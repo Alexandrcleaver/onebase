@@ -402,7 +402,7 @@ func entityYAMLSchema() *yamlLintSchema {
 	})
 	return with(obj(
 		"name", "title", "description", "posting", "hierarchical", "hierarchy_kind",
-		"presentation",
+		"presentation", "order_by", "choice_preview", "choice_preview_proc",
 		"list_form", "item_form", "based_on", "list_mode", "notify_changes", "list_refresh_on",
 		"fulltext", "search_fields", "detail_panel",
 	), map[string]*yamlLintSchema{
@@ -454,7 +454,14 @@ func constantsYAMLSchema() *yamlLintSchema {
 }
 
 func widgetYAMLSchema() *yamlLintSchema {
-	return with(obj("name", "type", "title", "query", "format", "compare_to", "limit", "chart_kind", "chart_type", "x_field", "y_fields", "entities", "scope", "link"), map[string]*yamlLintSchema{
+	return with(obj("name", "type", "title", "query", "format", "compare_to", "limit", "chart_kind", "chart_type", "x_field", "y_fields", "entities", "scope", "link", "refresh_on"), map[string]*yamlLintSchema{
+		"source": obj("entity", "id_field"),
+		"filters": seq(with(obj("name", "label", "type", "param"), map[string]*yamlLintSchema{
+			"labels": freeMap(),
+			"values": seq(with(obj("value", "label"), map[string]*yamlLintSchema{
+				"labels": freeMap(),
+			})),
+		})),
 		"titles": freeMap(),
 		"params": freeMap(),
 		"columns": seq(with(obj("field", "label", "format", "align"), map[string]*yamlLintSchema{
@@ -613,16 +620,21 @@ func formModuleYAMLSchema() *yamlLintSchema {
 		// неизвестными, а гейт CI считает предупреждение ошибкой — то есть
 		// документированный «language» у kind: ПолеКода не давал примеру
 		// пройти собственную проверку (#1014).
-		"orientation", "input_mask", "language", "virtual_columns",
+		"orientation", "background", "input_mask", "language", "virtual_columns",
 	} {
 		element.keys[k] = nil
 	}
+	// choice_context — карта «параметр → путь к значению», а не скаляр: состав
+	// ключей свободный, поэтому freeMap, иначе линт ругался бы на каждое имя
+	// параметра.
+	element.keys["choice_context"] = freeMap()
 	element.keys["title"] = freeMap()
 	element.keys["events"] = freeMap()
 	element.keys["props"] = freeMap()
 	element.keys["children"] = seq(element)
 	element.keys["choices"] = seq(with(obj("value"), map[string]*yamlLintSchema{"title": freeMap()}))
 	element.keys["options"] = seq(with(obj("value"), map[string]*yamlLintSchema{"label": freeMap()}))
+	element.keys["choice_filter"] = seq(obj("field", "op", "from", "value"))
 
 	attrColumn := with(obj("id", "original_id", "name", "type", "length", "precision"), map[string]*yamlLintSchema{
 		"title": freeMap(),
@@ -657,12 +669,22 @@ func formModuleYAMLSchema() *yamlLintSchema {
 	// RefCardButton у тега yaml:"form"). Пока ключ был разрешён и в корне,
 	// конфигурация с ним проходила линт зелёно, а кнопка молча оставалась на
 	// месте — ровно та «тихая потеря», от которой этот линт и заведён (#1450).
+	action := obj("visible")
+	actions := with(obj(), map[string]*yamlLintSchema{
+		"delete": action,
+		"save":   action,
+		"ok":     action,
+		"close":  action,
+		// attachments.visible:false скрывает панель вложений выбранной
+		// managed-формы (план 181C, #1621); attachment endpoint не меняется.
+		"attachments": action,
+	})
 	return with(obj("schema", "entity", "name", "kind", "layout_kind", "original_id", "auto_save_settings", "auto_save_data_in_settings", "vertical_scroll"), map[string]*yamlLintSchema{
 		"form":                   formHeader,
 		"title":                  freeMap(),
 		"events":                 freeMap(),
 		"elements":               seq(element),
-		"actions":                freeMap(),
+		"actions":                actions,
 		"attributes":             seq(attr),
 		"commands":               seq(command),
 		"command_bar":            commandBar,
