@@ -1707,8 +1707,12 @@ func CheckLintRoles(dir string, proj *project.Project, roles []*auth.Role) []Iss
 		}
 	}
 	roleProcessorWarning := func(role *auth.Role, code, message, fix string) Issue {
+		file := "roles"
+		if role.SourceFile != "" {
+			file = filepath.ToSlash(filepath.Join("roles", role.SourceFile))
+		}
 		return Issue{
-			File:         "roles/" + role.Name + ".yaml",
+			File:         file,
 			Object:       role.Name,
 			Kind:         "Роль",
 			Code:         code,

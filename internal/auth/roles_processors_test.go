@@ -96,6 +96,44 @@ func TestParseRoleProcessorsDefault(t *testing.T) {
 	})
 }
 
+// Строгий контракт проверяется на публичном разборе роли, включая поддерживаемые
+// синонимы и вложенные секции прав.
+func TestParseRoleProcessorsDefaultStrict(t *testing.T) {
+	bad := []struct {
+		name        string
+		permissions string
+	}{
+		{"null", "processors_default: null"},
+		{"empty", `processors_default: ""`},
+		{"space", `processors_default: " allow "`},
+		{"other case", "processors_default: Allow"},
+		{"alias map", "processors_default: allow\n  обработка: {}"},
+		{"wrapper map", "processors_default: allow\n  права:\n    processors: {}"},
+		{"wrapped default", "права:\n    processors_default: allow\n  обработки: {}"},
+		{"duplicate default", "processors_default: allow\n  права:\n    processors_default: allow"},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseRole([]byte("name: Роль\npermissions:\n  " + tc.permissions + "\n"))
+			if err == nil || !strings.Contains(err.Error(), "processors_default") {
+				t.Fatalf("ParseRole должен отвергнуть %s: %v", tc.name, err)
+			}
+		})
+	}
+
+	role, err := ParseRole([]byte("name: Роль\npermissions:\n  права:\n    processors_default: allow\n"))
+	if err != nil {
+		t.Fatalf("вложенный compatibility-ключ: %v", err)
+	}
+	if got := ProcessorPermissionMode(role.Permissions); got != ProcessorModeExplicitAllowAll {
+		t.Fatalf("вложенный compatibility-ключ потерян: mode=%q", got)
+	}
+	role, err = ParseRole([]byte("name: Роль\npermissions:\n  processors: null\n  processors_default: allow\n"))
+	if err != nil || ProcessorPermissionMode(role.Permissions) != ProcessorModeExplicitAllowAll {
+		t.Fatalf("null-секция processors разрешена рядом с default: role=%+v err=%v", role, err)
+	}
+}
+
 // Compatibility-ключ обязан переживать представление прав в _roles: старые
 // бинари его игнорируют, новые после SyncRoles должны видеть снова.
 func TestProcessorsDefaultJSONRoundTrip(t *testing.T) {

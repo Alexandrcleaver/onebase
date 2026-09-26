@@ -12,10 +12,10 @@ import (
 func TestLintRoles_ProcessorsImplicitAllowWarnsPerRole(t *testing.T) {
 	dir := t.TempDir()
 	mkFile(t, filepath.Join(dir, "catalogs", "клиент.yaml"), "name: Клиент\nfields:\n  - name: Номер\n    type: string\n")
-mkFile(t, filepath.Join(dir, "processors", "импорт.yaml"), "name: Импорт\nparams: []\n")
+	mkFile(t, filepath.Join(dir, "processors", "импорт.yaml"), "name: Импорт\nparams: []\n")
 	mkFile(t, filepath.Join(dir, "src", "импорт.proc.os"), "Процедура Выполнить() Экспорт\nКонецПроцедуры\n")
 	mkFile(t, filepath.Join(dir, "processors", "тестовая.yaml"), "name: Тестовая\nkind: test\nparams: []\n")
-	mkFile(t, filepath.Join(dir, "roles", "менеджер.yaml"), "name: Менеджер\npermissions:\n  catalogs:\n    Клиент: [read]\n")
+	mkFile(t, filepath.Join(dir, "roles", "access.yaml"), "name: Менеджер\npermissions:\n  catalogs:\n    Клиент: [read]\n")
 	mkFile(t, filepath.Join(dir, "roles", "гость.yaml"), "name: Гость\npermissions:\n  processors: {}\n")
 	mkFile(t, filepath.Join(dir, "roles", "оператор.yaml"), "name: Оператор\npermissions:\n  processors:\n    Импорт: [run]\n")
 
@@ -30,8 +30,8 @@ mkFile(t, filepath.Join(dir, "processors", "импорт.yaml"), "name: Импо
 			continue
 		}
 		implicit++
-		if w.Object != "Менеджер" {
-			t.Fatalf("implicit-warning не той роли: %+v", w)
+		if w.Object != "Менеджер" || w.File != "roles/access.yaml" {
+			t.Fatalf("implicit-warning должен указывать исходный файл роли: %+v", w)
 		}
 		// Тест-обработка не считается: доступных нетестовых обработок ровно одна.
 		if !strings.Contains(w.Message, "(1)") {

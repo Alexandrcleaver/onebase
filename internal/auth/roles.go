@@ -28,8 +28,8 @@ type Permission struct {
 	// значение "allow", сохраняющее роли доступ ко всем обработкам. Разрешено
 	// только при отсутствующей/null-секции processors; сочетание с любой картой
 	// (включая {}) — ошибка конфигурации, её отвергает разбор роли.
-	ProcessorsDefault string    `yaml:"processors_default"`
-	RowAccess         RowAccess `yaml:"row_access"`
+	ProcessorsDefault string      `yaml:"processors_default"`
+	RowAccess         RowAccess   `yaml:"row_access"`
 	FieldAccess       FieldAccess `yaml:"field_access"`
 }
 
@@ -50,28 +50,66 @@ type Role struct {
 	Name        string     `yaml:"name"`
 	Description string     `yaml:"description"`
 	Permissions Permission `yaml:"permissions"`
+	SourceFile  string     `yaml:"-" json:"-"` // имя исходного roles/*.yaml, если роль загружена из файла
 }
 
 func (p *Permission) UnmarshalYAML(value *yaml.Node) error {
+	// Наличие ключа нельзя определить по строковому полю: null и "" при
+	// декодировании выглядят как отсутствие processors_default.
+	hasDefault, err := validateProcessorsDefaultYAML(value)
+	if err != nil {
+		return err
+	}
 	type plain Permission
 	var canonical plain
 	if err := value.Decode(&canonical); err != nil {
 		return err
 	}
-	if d := strings.TrimSpace(canonical.ProcessorsDefault); d != "" {
-		if d != "allow" {
-			return fmt.Errorf("processors_default: %q — допустимо ровно значение allow; явный запрет записывается как processors: {}", canonical.ProcessorsDefault)
-		}
-		if canonical.Processors != nil {
-			return fmt.Errorf("processors_default: allow несовместим с явной секцией processors (включая {}) — уберите одно из двух")
-		}
-	}
 	parsed := normalizePermission(Permission(canonical))
 	if value.Kind == yaml.MappingNode {
 		parsed = mergePermissions(parsed, permissionFromYAMLMap(value))
 	}
+	if hasDefault {
+		parsed.ProcessorsDefault = "allow"
+		// Проверяем после объединения синонимов и вложенных секций прав.
+		if parsed.Processors != nil {
+			return fmt.Errorf("processors_default: allow несовместим с явной секцией processors (включая {}) — уберите одно из двух")
+		}
+	}
 	*p = parsed
 	return nil
+}
+
+func validateProcessorsDefaultYAML(node *yaml.Node) (bool, error) {
+	found := false
+	var visit func(*yaml.Node) error
+	visit = func(mapping *yaml.Node) error {
+		if mapping == nil || mapping.Kind != yaml.MappingNode {
+			return nil
+		}
+		for i := 0; i+1 < len(mapping.Content); i += 2 {
+			key, value := mapping.Content[i].Value, mapping.Content[i+1]
+			switch {
+			case processorsDefaultJSONKey(key):
+				if found {
+					return fmt.Errorf("processors_default: ключ задан более одного раза")
+				}
+				found = true
+				if value.Kind != yaml.ScalarNode || value.Tag != "!!str" || value.Value != "allow" {
+					return fmt.Errorf("processors_default: допустимо ровно строковое значение allow; явный запрет записывается как processors: {}")
+				}
+			case permissionWrapperKey(key):
+				if err := visit(value); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := visit(node); err != nil {
+		return false, err
+	}
+	return found, nil
 }
 
 // Has reports whether the user has permission for (kind, entity, op).
@@ -537,6 +575,7 @@ func LoadRoleFile(path string) (*Role, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: parse role %s: %w", filepath.Base(path), err)
 	}
+	role.SourceFile = filepath.Base(path)
 	return role, nil
 }
 
