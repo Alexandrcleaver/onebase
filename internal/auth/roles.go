@@ -54,6 +54,13 @@ type Role struct {
 }
 
 func (p *Permission) UnmarshalYAML(value *yaml.Node) error {
+	// Decode раскрывает YAML merge, а ручной обход синонимов и вложенных секций
+	// раньше видел только прямые ключи. Обе ветки должны читать одну эффективную
+	// карту merge, иначе унаследованный processors_default обходил валидацию.
+	value, err := expandPermissionYAML(value, make(map[*yaml.Node]bool))
+	if err != nil {
+		return err
+	}
 	// Наличие ключа нельзя определить по строковому полю: null и "" при
 	// декодировании выглядят как отсутствие processors_default.
 	hasDefault, err := validateProcessorsDefaultYAML(value)
@@ -78,6 +85,127 @@ func (p *Permission) UnmarshalYAML(value *yaml.Node) error {
 	}
 	*p = parsed
 	return nil
+}
+
+// expandPermissionYAML раскрывает YAML merge до разбора Permission. Обычные
+// aliases сохраняются: ручной обход намеренно не активирует права из alias
+// внутри вложенной обёртки.
+// В merge-последовательности первое значение ключа выигрывает, а прямой ключ
+// перекрывает унаследованный. Циклы и некорректные merge-источники отвергаются.
+func expandPermissionYAML(node *yaml.Node, visiting map[*yaml.Node]bool) (*yaml.Node, error) {
+	if node == nil {
+		return nil, nil
+	}
+	if node.Kind == yaml.AliasNode {
+		return node, nil
+	}
+	if visiting[node] {
+		return nil, fmt.Errorf("циклический YAML alias в permissions")
+	}
+	visiting[node] = true
+	defer delete(visiting, node)
+
+	expanded := *node
+	expanded.Anchor = ""
+	expanded.Alias = nil
+	expanded.Content = nil
+	if node.Kind != yaml.MappingNode {
+		for _, child := range node.Content {
+			item, err := expandPermissionYAML(child, visiting)
+			if err != nil {
+				return nil, err
+			}
+			expanded.Content = append(expanded.Content, item)
+		}
+		return &expanded, nil
+	}
+	if len(node.Content)%2 != 0 {
+		return nil, fmt.Errorf("некорректная YAML-карта permissions")
+	}
+
+	explicit := make(map[string]bool)
+	mergeCount := 0
+	for i := 0; i < len(node.Content); i += 2 {
+		key := node.Content[i]
+		if key.Tag == "!!merge" {
+			mergeCount++
+			if mergeCount > 1 {
+				return nil, fmt.Errorf("дублированный YAML merge в permissions")
+			}
+			continue
+		}
+		if explicit[key.Value] {
+			return nil, fmt.Errorf("дублированный YAML-ключ %q в permissions", key.Value)
+		}
+		explicit[key.Value] = true
+	}
+	merged := make(map[string]bool)
+	for i := 0; i < len(node.Content); i += 2 {
+		if node.Content[i].Tag != "!!merge" {
+			continue
+		}
+		maps, err := expandPermissionYAMLMergeSources(node.Content[i+1], visiting)
+		if err != nil {
+			return nil, err
+		}
+		for _, mapping := range maps {
+			for j := 0; j < len(mapping.Content); j += 2 {
+				key := mapping.Content[j]
+				if !explicit[key.Value] && !merged[key.Value] {
+					expanded.Content = append(expanded.Content, key, mapping.Content[j+1])
+					merged[key.Value] = true
+				}
+			}
+		}
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		if node.Content[i].Tag == "!!merge" {
+			continue
+		}
+		key, err := expandPermissionYAML(node.Content[i], visiting)
+		if err != nil {
+			return nil, err
+		}
+		item, err := expandPermissionYAML(node.Content[i+1], visiting)
+		if err != nil {
+			return nil, err
+		}
+		expanded.Content = append(expanded.Content, key, item)
+	}
+	return &expanded, nil
+}
+
+func expandPermissionYAMLMergeSources(node *yaml.Node, visiting map[*yaml.Node]bool) ([]*yaml.Node, error) {
+	if node == nil {
+		return nil, fmt.Errorf("YAML merge в permissions требует карту")
+	}
+	if node.Kind == yaml.AliasNode {
+		if node.Alias == nil || visiting[node] {
+			return nil, fmt.Errorf("циклический или некорректный YAML merge alias в permissions")
+		}
+		visiting[node] = true
+		defer delete(visiting, node)
+		return expandPermissionYAMLMergeSources(node.Alias, visiting)
+	}
+	if node.Kind == yaml.SequenceNode {
+		var maps []*yaml.Node
+		for _, item := range node.Content {
+			part, err := expandPermissionYAMLMergeSources(item, visiting)
+			if err != nil {
+				return nil, err
+			}
+			maps = append(maps, part...)
+		}
+		return maps, nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("YAML merge в permissions требует карту или список карт")
+	}
+	mapNode, err := expandPermissionYAML(node, visiting)
+	if err != nil {
+		return nil, err
+	}
+	return []*yaml.Node{mapNode}, nil
 }
 
 func validateProcessorsDefaultYAML(node *yaml.Node) (bool, error) {

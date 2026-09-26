@@ -134,6 +134,48 @@ func TestParseRoleProcessorsDefaultStrict(t *testing.T) {
 	}
 }
 
+// ParseRole — публичный путь загрузки role YAML. Merge-ключи должны проходить
+// ту же проверку, что прямые и вложенные permissions.
+func TestParseRoleProcessorsDefaultYAMLMerge(t *testing.T) {
+	bad := []struct {
+		name string
+		body string
+	}{
+		{"merged deny", "permissions:\n  <<: {processors_default: deny}\n"},
+		{"merged null", "permissions:\n  <<: {processors_default: null}\n"},
+		{"merged empty", "permissions:\n  <<: {processors_default: \"\"}\n"},
+		{"merged allow and map", "permissions:\n  <<: {processors_default: allow}\n  processors: {}\n"},
+		{"merged map and direct allow", "permissions:\n  <<: {processors: {}}\n  processors_default: allow\n"},
+		{"merged wrapper map", "permissions:\n  processors_default: allow\n  права:\n    <<: {processors: {}}\n"},
+		{"merged wrapper default", "permissions:\n  права:\n    <<: {processors_default: deny}\n"},
+		{"merged sequence", "permissions:\n  <<: [{processors_default: allow}, {processors: {}}]\n"},
+		{"aliased merge", "defaults: &defaults {processors_default: deny}\npermissions:\n  <<: *defaults\n"},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseRole([]byte("name: Роль\n" + tc.body))
+			if err == nil || !strings.Contains(err.Error(), "processors_default") {
+				t.Fatalf("ParseRole принял %s: %v", tc.name, err)
+			}
+		})
+	}
+
+	valid := []string{
+		"permissions:\n  <<: {processors_default: allow}\n",
+		"permissions:\n  права:\n    <<: {processors_default: allow}\n",
+		"permissions:\n  <<: {processors_default: deny}\n  processors_default: allow\n",
+	}
+	for _, body := range valid {
+		role, err := ParseRole([]byte("name: Роль\n" + body))
+		if err != nil {
+			t.Fatalf("допустимый merge отвергнут: %s: %v", body, err)
+		}
+		if got := ProcessorPermissionMode(role.Permissions); got != ProcessorModeExplicitAllowAll {
+			t.Fatalf("merge потерял режим: %s: %q", body, got)
+		}
+	}
+}
+
 // Compatibility-ключ обязан переживать представление прав в _roles: старые
 // бинари его игнорируют, новые после SyncRoles должны видеть снова.
 func TestProcessorsDefaultJSONRoundTrip(t *testing.T) {

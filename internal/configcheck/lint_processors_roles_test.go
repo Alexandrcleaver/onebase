@@ -102,3 +102,28 @@ func TestLintRoles_ProcessorsDefaultConflictsWithMap(t *testing.T) {
 		t.Fatalf("ошибка не называет processors_default: %+v", res.Issues)
 	}
 }
+
+func TestCheckRoles_ProcessorsDefaultYAMLMergeRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"invalid value", "<<: {processors_default: deny}"},
+		{"conflicting map", "<<: {processors_default: allow}\n  processors: {}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mkFile(t, filepath.Join(dir, "roles", "роль.yaml"), "name: Роль\npermissions:\n  "+tc.body+"\n")
+			res := RunFullWithOptions(dir, Options{Lint: true})
+			if res.OK {
+				t.Fatalf("onebase check --lint принял недопустимую роль: %+v", res)
+			}
+			for _, issue := range res.Issues {
+				if strings.Contains(issue.Message, "processors_default") {
+					return
+				}
+			}
+			t.Fatalf("ошибка не называет processors_default: %+v", res.Issues)
+		})
+	}
+}
