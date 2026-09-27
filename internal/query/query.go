@@ -11,6 +11,7 @@ import (
 	"github.com/ivantit66/onebase/internal/i18n/i18nerr"
 	"github.com/ivantit66/onebase/internal/metadata"
 	"github.com/ivantit66/onebase/internal/storage"
+	"github.com/ivantit66/onebase/internal/typedempty"
 	"github.com/shopspring/decimal"
 )
 
@@ -78,6 +79,14 @@ type Result struct {
 	// результата» неоднозначно, и молча приводить значения нельзя — то же
 	// правило, что у BoolColumns/DateColumns.
 	RefColumns map[string]string
+	// TypedColumns is a fail-closed semantic descriptor for direct projections
+	// of one declared source. It is consumed only by the DSL query boundary;
+	// generic query runners keep SQL NULL unchanged.
+	TypedColumns map[string]typedempty.Descriptor
+	// DSLColumnAliases maps the field name requested by a DSL projection to the
+	// actual key returned by the SQL driver when the compiler rewrites a system
+	// register field (Период -> period, ВидДвижения -> вид_движения).
+	DSLColumnAliases map[string]string
 	// Projection — поэлементный разбор списка выборки (план 88E). Позволяет
 	// маскировать защищённые поля в колонках результата вместо отказа во всём
 	// запросе; при Projection.Simple == false действует прежний отказ по
@@ -628,6 +637,11 @@ type refDimInfo struct {
 }
 
 func (rd refDimInfo) displayCol() string {
+	// Системная таблица учётных записей: колонки «наименование» у неё нет.
+	// Представление учётки — ПолноеИмя, а при пустом — логин (#1646).
+	if metadata.IsSystemRefTarget(rd.refEntity) {
+		return fmt.Sprintf("COALESCE(NULLIF(%s.full_name, ''), %s.login)", rd.joinAlias, rd.joinAlias)
+	}
 	if rd.refIsDoc {
 		return rd.joinAlias + ".номер"
 	}
@@ -781,6 +795,13 @@ func (tr *translator) addSource(typeUpper, name string) {
 // RBAC должен проверить право чтения на неё, а не только на главную таблицу.
 func (tr *translator) addRefSource(rd refDimInfo) {
 	if rd.refEntity == "" {
+		return
+	}
+	// Системная таблица учётных записей — не сущность конфигурации: прав на неё
+	// в ролях не существует, и регистрировать источник для RBAC/масок нечего.
+	// Ложная регистрация дала бы не-администратору denial по несуществующему
+	// объекту прав (#1646).
+	if metadata.IsSystemRefTarget(rd.refEntity) {
 		return
 	}
 	tr.addSource(rd.refSrcType, rd.refEntity)
@@ -2826,6 +2847,206 @@ func sourceColumnTypes(typeUpper, name string, opts CompileOpts) map[string]meta
 	return m
 }
 
+// buildScopedColTypes maps each SELECT scope to the types of the columns its own
+// sources expose without a qualifier. buildColTypes deliberately describes only
+// the first source of the whole token stream, so an unqualified argument inside
+// a nested SELECT or another UNION branch would otherwise be typed by a foreign
+// source. A name that two sources of the same scope type differently is dropped:
+// the compiler must not guess which one the author meant.
+func buildScopedColTypes(tokens []tok, opts CompileOpts, sourceCtx sourceContext) map[int]map[string]metadata.FieldType {
+	scoped := map[int]map[string]metadata.FieldType{}
+	ambiguous := map[int]map[string]bool{}
+
+	for i := 0; i+2 < len(tokens); i++ {
+		if tokens[i].kind != tIdent || tokens[i+1].kind != tDot || tokens[i+2].kind != tIdent {
+			continue
+		}
+		typeUpper := upperFast(tokens[i].val)
+		if !isSourceType(typeUpper) {
+			continue
+		}
+		scopeID, ok := sourceCtx.scopeIDAt(i)
+		if !ok {
+			continue
+		}
+		fields := sourceColTypes(typeUpper, tokens[i+2].val, opts)
+		if fields == nil {
+			continue
+		}
+		if scoped[scopeID] == nil {
+			scoped[scopeID] = map[string]metadata.FieldType{}
+			ambiguous[scopeID] = map[string]bool{}
+		}
+		for name, typ := range fields {
+			if ambiguous[scopeID][name] {
+				continue
+			}
+			if current, exists := scoped[scopeID][name]; exists {
+				if current != typ {
+					delete(scoped[scopeID], name)
+					ambiguous[scopeID][name] = true
+				}
+				continue
+			}
+			scoped[scopeID][name] = typ
+		}
+	}
+	return scoped
+}
+
+// buildQualifiedColTypes maps each unambiguous source qualifier to the field
+// types of that exact source within its SELECT scope. Scalar functions are
+// rewritten before FROM is emitted, so a qualified argument such as Other.Value
+// cannot use colTypes: that map intentionally describes only the first source
+// of the query. Qualifiers must stay scoped because the same alias may denote
+// different sources in a nested SELECT or another UNION branch.
+func buildQualifiedColTypes(tokens []tok, opts CompileOpts, sourceCtx sourceContext) map[int]map[string]map[string]metadata.FieldType {
+	qualified := map[int]map[string]map[string]metadata.FieldType{}
+	ambiguous := map[int]map[string]bool{}
+
+	sameTypes := func(a, b map[string]metadata.FieldType) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for name, typ := range a {
+			if b[name] != typ {
+				return false
+			}
+		}
+		return true
+	}
+	addQualifier := func(scopeID int, name string, fields map[string]metadata.FieldType) {
+		name = lowerFast(name)
+		if name == "" {
+			return
+		}
+		if qualified[scopeID] == nil {
+			qualified[scopeID] = map[string]map[string]metadata.FieldType{}
+		}
+		if ambiguous[scopeID] == nil {
+			ambiguous[scopeID] = map[string]bool{}
+		}
+		if ambiguous[scopeID][name] {
+			return
+		}
+		if current, ok := qualified[scopeID][name]; ok {
+			if !sameTypes(current, fields) {
+				delete(qualified[scopeID], name)
+				ambiguous[scopeID][name] = true
+			}
+			return
+		}
+		qualified[scopeID][name] = fields
+	}
+
+	for i := 0; i+2 < len(tokens); i++ {
+		if tokens[i].kind != tIdent || tokens[i+1].kind != tDot || tokens[i+2].kind != tIdent {
+			continue
+		}
+		typeUpper := upperFast(tokens[i].val)
+		if !isSourceType(typeUpper) {
+			continue
+		}
+		scopeID, ok := sourceCtx.scopeIDAt(i)
+		if !ok {
+			continue
+		}
+		name := tokens[i+2].val
+		fields := sourceColTypes(typeUpper, name, opts)
+		if fields == nil {
+			continue
+		}
+		addQualifier(scopeID, name, fields)
+		addQualifier(scopeID, sourceToTable(typeUpper, name), fields)
+
+		// У виртуальной таблицы пользовательский алиас стоит после списка
+		// аргументов: Регистр.X.Остатки(...) КАК Р (та же логика, что в
+		// разборе областей FROM).
+		if i+5 < len(tokens) && tokens[i+3].kind == tDot && tokens[i+5].kind == tLParen {
+			depth := 0
+			for j := i + 5; j < len(tokens); j++ {
+				switch tokens[j].kind {
+				case tLParen:
+					depth++
+				case tRParen:
+					depth--
+					if depth == 0 {
+						aliasPos := j + 1
+						if aliasPos+1 < len(tokens) && tokens[aliasPos].kind == tIdent {
+							aliasUpper := upperFast(tokens[aliasPos].val)
+							if (aliasUpper == "КАК" || aliasUpper == "AS") && tokens[aliasPos+1].kind == tIdent {
+								addQualifier(scopeID, tokens[aliasPos+1].val, fields)
+							}
+						}
+						j = len(tokens)
+					}
+				}
+			}
+			continue
+		}
+
+		// A regular source has its optional alias directly after the entity name.
+		aliasPos := i + 3
+		if aliasPos+1 < len(tokens) && tokens[aliasPos].kind == tIdent {
+			aliasUpper := upperFast(tokens[aliasPos].val)
+			if (aliasUpper == "КАК" || aliasUpper == "AS") && tokens[aliasPos+1].kind == tIdent {
+				addQualifier(scopeID, tokens[aliasPos+1].val, fields)
+			}
+		}
+	}
+	return qualified
+}
+
+func sourceColTypes(typeUpper, name string, opts CompileOpts) map[string]metadata.FieldType {
+	fields := map[string]metadata.FieldType{}
+	add := func(items []metadata.Field) {
+		for _, field := range items {
+			fields[lowerFast(field.Name)] = field.Type
+		}
+	}
+	switch {
+	case isAccumRegType(typeUpper):
+		for _, reg := range opts.Registers {
+			if strings.EqualFold(reg.Name, name) {
+				add(reg.Dimensions)
+				add(reg.Resources)
+				add(reg.Attributes)
+				fields["period"] = metadata.FieldTypeDate
+				fields["период"] = metadata.FieldTypeDate
+				return fields
+			}
+		}
+	case isInfoRegType(typeUpper):
+		for _, reg := range opts.InfoRegs {
+			if strings.EqualFold(reg.Name, name) {
+				add(reg.Dimensions)
+				add(reg.Resources)
+				fields["period"] = metadata.FieldTypeDate
+				fields["период"] = metadata.FieldTypeDate
+				return fields
+			}
+		}
+	case isAccountRegType(typeUpper):
+		for _, reg := range opts.AccountRegs {
+			if strings.EqualFold(reg.Name, name) {
+				add(reg.Resources)
+				add(reg.Subconto)
+				fields["period"] = metadata.FieldTypeDate
+				fields["период"] = metadata.FieldTypeDate
+				return fields
+			}
+		}
+	default:
+		for _, entity := range opts.Entities {
+			if strings.EqualFold(entity.Name, name) {
+				add(entity.Fields)
+				return fields
+			}
+		}
+	}
+	return nil
+}
+
 // needsNumberCast — true, если колонку поля number нужно обернуть в
 // CAST(... AS NUMERIC): только на SQLite (там number хранится как TEXT) и только
 // в позициях сравнения/сортировки (WHERE/HAVING/ORDER BY). В ВЫБРАТЬ не кастим —
@@ -3869,10 +4090,17 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 	}
 	projectionFields := projectionFieldNames(tokens)
 	projectionPlan := analyzeProjection(tokens)
+	// Типы нужно снять до раскрытия функций: после Год(Момент) → EXTRACT/strftime
+	// исходная граница аргумента теряется, а локализовать можно только date-момент,
+	// не произвольную строку и не будущий localdate (#1243).
+	colTypes := buildColTypes(tokens, opts)
+	scalarSourceCtx := preScanSourceContext(tokens)
+	qualifiedColTypes := buildQualifiedColTypes(tokens, opts, scalarSourceCtx)
+	scopedColTypes := buildScopedColTypes(tokens, opts, scalarSourceCtx)
 	tokens = rewriteGroupingReferenceAliases(tokens)
 	// расширяем НачалоДня/Год/Месяц/ОКР/АБС/ЦЕЛ/... в SQL-эквиваленты
 	// до основной трансляции, чтобы остальные шаги ничего не знали о них.
-	tokens = rewriteScalarFuncs(tokens, dialectName(opts.Dialect))
+	tokens = rewriteScalarFuncs(tokens, dialectName(opts.Dialect), scopedColTypes, qualifiedColTypes, scalarSourceCtx, 0, opts.Params)
 	tokens = rewriteStrftime(tokens, dialectName(opts.Dialect))
 	tr := &translator{
 		tokens:      tokens,
@@ -3880,7 +4108,7 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 		paramValues: opts.Params,
 		opts:        opts,
 		colMap:      buildColMap(tokens, opts),
-		colTypes:    buildColTypes(tokens, opts),
+		colTypes:    colTypes,
 		mainTable:   preScanMainTable(tokens),
 		refDims:     preScanRefDims(tokens, opts),
 		mainRef:     preScanMainRefSource(tokens, opts),
@@ -4337,6 +4565,7 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 	if err := tr.assertRowFiltersApplied(); err != nil {
 		return Result{}, err
 	}
+	typedColumns, dslColumnAliases := typedProjectionColumns(projectionPlan, tokens, opts, tr.sourceCtx, tr.refCols)
 	return Result{
 		SQL:              tr.build(),
 		Args:             tr.args,
@@ -4346,18 +4575,195 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 		BoolColumns:      boolOutputColumns(projectionPlan, tr.colTypes),
 		DateColumns:      typedOutputColumns(projectionPlan, tr.colTypes, metadata.FieldTypeDate),
 		RefColumns:       refOutputColumns(projectionPlan, tr.refCols),
+		TypedColumns:     typedColumns,
+		DSLColumnAliases: dslColumnAliases,
 	}, nil
 }
 
 // refOutputColumns отдаёт собранные транслятором колонки-ссылки, но только для
 // простой проекции: при ОБЪЕДИНИТЬ и подзапросах имя колонки результата может
-// прийти из другой ветки, и обещать по нему тип нельзя. То же ограничение, что у
-// boolOutputColumns/typedOutputColumns, — и по той же причине.
+// прийти из другой ветки, и обещать по нему тип нельзя. Явный JOIN это не
+// запрещает: translator уже знает точный SQL-выход выбранной ссылки.
 func refOutputColumns(p ProjectionPlan, cols map[string]string) map[string]string {
 	if !p.Simple || len(cols) == 0 {
 		return nil
 	}
 	return cols
+}
+
+func singleProjectionSource(p ProjectionPlan, sourceCtx sourceContext) bool {
+	return p.Simple && len(sourceCtx.scopes) == 1 && sourceCtx.scopes[0].sourceCount == 1
+}
+
+type typedProjectionSource struct {
+	fields     map[string]typedempty.Descriptor
+	qualifiers map[string]bool
+	system     map[string]bool
+	self       typedempty.Descriptor
+}
+
+// typedProjectionColumns proves a result type only for a direct field of one
+// declared non-virtual source. JOIN, UNION, expressions and unresolved paths
+// deliberately keep SQL NULL as the general DSL Неопределено.
+func typedProjectionColumns(
+	p ProjectionPlan,
+	tokens []tok,
+	opts CompileOpts,
+	sourceCtx sourceContext,
+	refCols map[string]string,
+) (map[string]typedempty.Descriptor, map[string]string) {
+	if !singleProjectionSource(p, sourceCtx) {
+		return nil, nil
+	}
+	source, ok := projectionSource(tokens, opts, sourceCtx.scopes[0])
+	if !ok {
+		return nil, nil
+	}
+	out := make(map[string]typedempty.Descriptor)
+	aliases := make(map[string]string)
+	for _, col := range p.Columns {
+		if col.Star || col.Output == "" || len(col.Path) == 0 {
+			continue
+		}
+		path := append([]string(nil), col.Path...)
+		if len(path) > 1 && source.qualifiers[lowerFast(path[0])] {
+			path = path[1:]
+		}
+		if len(path) != 1 {
+			// Exact reference links are added from translator.refCols below: it
+			// knows the actual SQL output key after compiler rewriting.
+			continue
+		}
+		name := path[0]
+		if isReferenceName(lowerFast(name)) && source.self.RefEntity != "" {
+			continue
+		}
+		desc, exists := source.fields[lowerFast(name)]
+		if !exists {
+			continue
+		}
+		if desc.RefEntity != "" {
+			// A bare reference requisit is rewritten to its presentation.
+			desc = typedempty.Descriptor{Type: metadata.FieldTypeString}
+		}
+		output := col.Output
+		if col.Alias == "" && source.system[lowerFast(name)] {
+			if actual, system := systemColAlias(name); system && actual != output {
+				aliases[output] = actual
+				output = actual
+			}
+		}
+		out[output] = desc
+	}
+	for output, entity := range refCols {
+		out[output] = typedempty.Descriptor{
+			Type:      metadata.FieldType("reference:" + entity),
+			RefEntity: entity,
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	if len(aliases) == 0 {
+		aliases = nil
+	}
+	return out, aliases
+}
+
+func projectionSource(tokens []tok, opts CompileOpts, scope sourceScope) (typedProjectionSource, bool) {
+	source := typedProjectionSource{
+		fields:     map[string]typedempty.Descriptor{},
+		qualifiers: map[string]bool{},
+		system:     map[string]bool{},
+	}
+	for qualifier := range scope.qualifiers {
+		source.qualifiers[lowerFast(qualifier)] = true
+	}
+	addFields := func(fields []metadata.Field) {
+		for i := range fields {
+			if desc, ok := typedempty.FromField(&fields[i]); ok {
+				source.fields[lowerFast(fields[i].Name)] = desc
+			}
+		}
+	}
+	for i := 0; i+2 < len(tokens); i++ {
+		if tokens[i].kind != tIdent || tokens[i+1].kind != tDot || tokens[i+2].kind != tIdent {
+			continue
+		}
+		typeUpper := upperFast(tokens[i].val)
+		if !isSourceType(typeUpper) {
+			continue
+		}
+		// Virtual-table columns have derived names (НачОстаток/Оборот/etc.).
+		// They require their own exact descriptor map; do not guess from the
+		// underlying register fields.
+		if i+3 < len(tokens) && tokens[i+3].kind == tDot {
+			return typedProjectionSource{}, false
+		}
+		name := tokens[i+2].val
+		switch {
+		case isAccumRegType(typeUpper):
+			for _, reg := range opts.Registers {
+				if reg != nil && strings.EqualFold(reg.Name, name) {
+					addFields(reg.Dimensions)
+					addFields(reg.Resources)
+					addFields(reg.Attributes)
+					addRegisterSystemFields(&source, true, true)
+					return source, true
+				}
+			}
+		case isInfoRegType(typeUpper):
+			for _, reg := range opts.InfoRegs {
+				if reg != nil && strings.EqualFold(reg.Name, name) {
+					addFields(reg.Dimensions)
+					addFields(reg.Resources)
+					if reg.Periodic {
+						addRegisterSystemFields(&source, true, false)
+					}
+					return source, true
+				}
+			}
+		case isAccountRegType(typeUpper):
+			for _, reg := range opts.AccountRegs {
+				if reg != nil && strings.EqualFold(reg.Name, name) {
+					addFields(reg.Resources)
+					addFields(reg.Subconto)
+					addRegisterSystemFields(&source, true, false)
+					return source, true
+				}
+			}
+		default:
+			for _, entity := range opts.Entities {
+				if entity != nil && strings.EqualFold(entity.Name, name) {
+					addFields(entity.Fields)
+					source.self = typedempty.Descriptor{
+						Type:      metadata.FieldType("reference:" + entity.Name),
+						RefEntity: entity.Name,
+					}
+					return source, true
+				}
+			}
+		}
+		return typedProjectionSource{}, false
+	}
+	return typedProjectionSource{}, false
+}
+
+func addRegisterSystemFields(source *typedProjectionSource, period, movement bool) {
+	if period {
+		desc := typedempty.Descriptor{Type: metadata.FieldTypeDate}
+		source.fields["period"] = desc
+		source.fields["период"] = desc
+		source.system["period"] = true
+		source.system["период"] = true
+	}
+	if movement {
+		desc := typedempty.Descriptor{Type: metadata.FieldTypeString}
+		source.fields["вид_движения"] = desc
+		source.fields["виддвижения"] = desc
+		source.system["вид_движения"] = true
+		source.system["виддвижения"] = true
+	}
 }
 
 // boolOutputColumns перечисляет колонки результата, читающие булево поле. Нужны
@@ -4518,7 +4924,7 @@ func scalarFuncRewrites(dialect string) map[string]funcRewrite {
 // т.п., чтобы основной транслятор обработал внутренний аргумент через обычные
 // правила (resolve ref dims, параметры и т.п.). Рекурсивно для вложенных
 // вызовов: Месяц(НачалоМесяца(x)) и ОКР(СУММА(x), 0) тоже разворачиваются.
-func rewriteScalarFuncs(tokens []tok, dialect string) []tok {
+func rewriteScalarFuncs(tokens []tok, dialect string, scopedColTypes map[int]map[string]metadata.FieldType, qualifiedColTypes map[int]map[string]map[string]metadata.FieldType, sourceCtx sourceContext, tokenOffset int, params map[string]any) []tok {
 	rewrites := scalarFuncRewrites(dialect)
 	var out []tok
 	for i := 0; i < len(tokens); i++ {
@@ -4548,8 +4954,27 @@ func rewriteScalarFuncs(tokens []tok, dialect string) []tok {
 					out = append(out, t)
 					continue
 				}
-				inner := tokens[i+2 : end]
-				inner = rewriteScalarFuncs(inner, dialect) // рекурсия
+				rawInner := tokens[i+2 : end]
+				inner := rewriteScalarFuncs(rawInner, dialect, scopedColTypes, qualifiedColTypes, sourceCtx, tokenOffset+i+2, params) // рекурсия
+				// SQLite хранит date как UTC-текст. Переводим момент в стенные
+				// часы приложения до календарной операции, но только когда тип
+				// аргумента это доказывает. Поэтому будущий localdate останется
+				// «как записан», а строка с похожим содержимым не сменит смысл.
+				// Тип аргумента доказывает область компилируемого SELECT, а не
+				// первый источник всего потока: одноимённое поле соседней
+				// области не должно решать за эту (#1243, круг 4).
+				var scopeColTypes map[string]metadata.FieldType
+				var scopeQualified map[string]map[string]metadata.FieldType
+				if scopeID, ok := sourceCtx.scopeIDAt(tokenOffset + i); ok {
+					scopeColTypes = scopedColTypes[scopeID]
+					scopeQualified = qualifiedColTypes[scopeID]
+				}
+				if dialect == "sqlite" && isCalendarDateFunc(key) && dateArgumentIsMoment(rawInner, scopeColTypes, scopeQualified, params) {
+					wrapped := tokenizeFragment("ob_local_datetime(")
+					wrapped = append(wrapped, inner...)
+					wrapped = append(wrapped, tokenizeFragment(")")...)
+					inner = wrapped
+				}
 				out = append(out, rw.prefix...)
 				out = append(out, inner...)
 				out = append(out, rw.suffix...)
@@ -4560,6 +4985,55 @@ func rewriteScalarFuncs(tokens []tok, dialect string) []tok {
 		out = append(out, t)
 	}
 	return out
+}
+
+func isCalendarDateFunc(name string) bool {
+	switch name {
+	case "началодня", "startofday", "конецдня", "endofday",
+		"началомесяца", "startofmonth", "началогода", "startofyear",
+		"год", "year", "месяц", "month", "день", "day":
+		return true
+	default:
+		return false
+	}
+}
+
+// dateArgumentIsMoment распознаёт только аргумент, чей моментный тип доказан
+// метаданными/параметром. Системный Период регистра тоже является моментом;
+// одноимённое прикладное поле сначала проверяется по метаданным. Сложные
+// выражения оставляем в прежней семантике fail-closed: угадывание их типа
+// локализовало бы будущий localdate или обычную строку.
+func dateArgumentIsMoment(tokens []tok, colTypes map[string]metadata.FieldType, qualifiedColTypes map[string]map[string]metadata.FieldType, params map[string]any) bool {
+	for len(tokens) >= 2 && tokens[0].kind == tLParen && tokens[len(tokens)-1].kind == tRParen {
+		tokens = tokens[1 : len(tokens)-1]
+	}
+	if len(tokens) == 1 {
+		switch tokens[0].kind {
+		case tIdent:
+			name := lowerFast(tokens[0].val)
+			if typ, ok := colTypes[name]; ok {
+				return typ == metadata.FieldTypeDate
+			}
+			return name == "период" || name == "period"
+		case tParam:
+			switch params[tokens[0].val].(type) {
+			case time.Time, *time.Time:
+				return true
+			}
+		}
+		return false
+	}
+	if len(tokens) == 3 && tokens[0].kind == tIdent && tokens[1].kind == tDot && tokens[2].kind == tIdent {
+		fields, ok := qualifiedColTypes[lowerFast(tokens[0].val)]
+		if !ok {
+			return false
+		}
+		if typ, ok := fields[lowerFast(tokens[2].val)]; ok {
+			return typ == metadata.FieldTypeDate
+		}
+		return false
+	}
+	return false
 }
 
 // momentTimeValue — контракт для DSL-значения «момент времени».
