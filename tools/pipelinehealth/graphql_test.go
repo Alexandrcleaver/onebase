@@ -19,17 +19,17 @@ import (
 func TestMain(m *testing.M) {
 	if os.Getenv("PIPELINEHEALTH_TEST_GH_HELPER") == "1" {
 		if path := os.Getenv("PIPELINEHEALTH_TEST_GH_SEQUENCE"); path != "" {
-			data, err := os.ReadFile(path)
+			data, err := os.ReadFile(path) //nolint:gosec // G703: this subprocess fixture path is supplied by the parent test under t.TempDir.
 			var pages []json.RawMessage
 			if err != nil || json.Unmarshal(data, &pages) != nil {
 				os.Exit(3)
 			}
-			counter, _ := os.ReadFile(path + ".index")
+			counter, _ := os.ReadFile(path + ".index") //nolint:gosec // G703: adjacent counter belongs to the same isolated test fixture.
 			index, _ := strconv.Atoi(string(counter))
 			if index >= len(pages) {
 				os.Exit(4)
 			}
-			if os.WriteFile(path+".index", []byte(strconv.Itoa(index+1)), 0o600) != nil {
+			if os.WriteFile(path+".index", []byte(strconv.Itoa(index+1)), 0o600) != nil { //nolint:gosec // G703: only the parent test's fixture counter is written.
 				os.Exit(5)
 			}
 			_, _ = os.Stdout.Write(pages[index])
