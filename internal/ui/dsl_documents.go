@@ -998,6 +998,7 @@ func (w *docWriter) writeInContextForAction(ctx context.Context, posting bool) e
 		w.saved = wasSaved
 		w.expectedVersion = previousVersion
 	})
+	entityservice.NotifySaveObserver(ctx, w.entity, entityservice.SaveResult{ID: w.obj.ID, Version: version})
 	// Живой список (план 87): отложенная до commit публикация «данные.<сущность>».
 	w.s.publishDocChange(ctx, w.entity, w.obj.ID, "записан", changeBefore)
 	// Веб-хук document.save (план 29) — Провести() зовёт write(), поэтому событие
@@ -1104,6 +1105,7 @@ func (w *docWriter) postInContextAfterAccess(ctx context.Context, hasPrelude, pr
 			w.saved = wasSaved
 			w.expectedVersion = previousVersion
 		})
+		entityservice.NotifySaveObserver(ctx, w.entity, entityservice.SaveResult{ID: w.obj.ID, Version: version})
 	}
 	if err := w.s.saveMovements(ctx, w.entity.Name, w.obj.ID, mc); err != nil {
 		return err
