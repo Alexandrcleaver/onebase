@@ -640,6 +640,46 @@ func formatDateValueForInput(v any) string {
 //
 // Возвращает (nil,...,false) если запрос отклонён (нет прав / ошибка парсинга);
 // в этом случае ответ уже записан в w.
+// dropAdminOnlyFields убирает из присланных значений поля, которые форма
+// объявила editable_admin_only, когда запись ведёт не администратор.
+// Возвращает имена отброшенных полей — по ним удобно писать тесты и, при
+// необходимости, журналировать попытку.
+func dropAdminOnlyFields(form *metadata.FormModule, fields map[string]any, admin bool) []string {
+	if form == nil || admin || len(fields) == 0 {
+		return nil
+	}
+	var dropped []string
+	form.Walk(func(el *metadata.FormElement) bool {
+		if el == nil || !el.EditableAdminOnly {
+			return true
+		}
+		name := formElementFieldName(el.DataPath)
+		if name == "" {
+			return true
+		}
+		for key := range fields {
+			if strings.EqualFold(key, name) {
+				delete(fields, key)
+				dropped = append(dropped, key)
+			}
+		}
+		return true
+	})
+	return dropped
+}
+
+// formElementFieldName — реквизит записи из двухсегментного data_path
+// «Объект.<Реквизит>». Для пути другой формы возвращает пустую строку:
+// колонку табличной части и реквизит формы этот путь не запирает, и check
+// такое сочетание отклоняет.
+func formElementFieldName(path string) string {
+	parts := strings.Split(strings.TrimSpace(path), ".")
+	if len(parts) != 2 || !strings.EqualFold(strings.TrimSpace(parts[0]), "Объект") {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
 func (s *Server) parseSubmitForm(w http.ResponseWriter, r *http.Request, entity *metadata.Entity, existingID *uuid.UUID) (
 	obj *runtime.Object, fields map[string]any, tpRows map[string][]map[string]any, action string, ok bool,
 ) {
@@ -696,6 +736,12 @@ func (s *Server) parseSubmitForm(w http.ResponseWriter, r *http.Request, entity 
 		s.renderObjectFormBadRequest(w, r, entity, existingID == nil, fieldsErr.Error(), tpRows)
 		return
 	}
+	// editable_admin_only: значения запертых полей отбрасываем ЗДЕСЬ, на сервере.
+	// Разметка запрета — подсказка интерфейсу, а не защита: POST её не
+	// спрашивает, и без этого запрет снимался бы подделанной формой или любым
+	// клиентом. Ключ просто удаляется из карты — у существующей записи прежнее
+	// значение остаётся нетронутым, у новой применяется значение по умолчанию.
+	dropAdminOnlyFields(form, fields, s.isAdmin(r))
 
 	mergeSubmittedEntityServiceFields(r, entity, fields)
 
@@ -1071,6 +1117,7 @@ func (s *Server) refOptionsJSON(w http.ResponseWriter, r *http.Request) {
 		extra := storage.ListParams{}
 		if choice != nil {
 			extra.ChoicePredicates = choice.Predicates
+			extra.IncludeFolders = choice.Folders
 		}
 		items, total, err = s.referenceOptionsPageWithParams(r.Context(), ent, r.URL.Query().Get("q"), limit, offset, extra)
 		if err != nil {
@@ -1097,7 +1144,7 @@ func (s *Server) refOptionsJSON(w http.ResponseWriter, r *http.Request) {
 	if choice != nil && choice.Selected != nil {
 		allowed := false
 		if !choice.Empty {
-			allowed, err = s.choiceSelectedAllowed(r.Context(), ent, *choice.Selected, choice.Predicates)
+			allowed, err = s.choiceSelectedAllowed(r.Context(), ent, *choice.Selected, choice.Predicates, choice.Folders)
 			if err != nil {
 				s.serverError(w, r, err)
 				return

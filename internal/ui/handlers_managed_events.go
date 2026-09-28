@@ -1782,15 +1782,45 @@ type elementStates struct {
 // ПОСЛЕ обработчика: команда меняет состояние объекта, и доступность полей
 // должна измениться сразу, а не после перезагрузки страницы. nil, если условий
 // в форме нет — клиенту нечего применять.
-func (s *Server) formElementStates(form *metadata.FormModule, entity *metadata.Entity, values map[string]any) *elementStates {
-	if form == nil || s.interp == nil {
+func (s *Server) formElementStates(form *metadata.FormModule, entity *metadata.Entity, values map[string]any, admin bool) *elementStates {
+	if form == nil {
 		return nil
 	}
-	ro, hidden, _ := managedFormElementStates(form, managedFormHeaderValues(entity, values), newInterpEvaluator(s.interp))
+	var ro, hidden map[string]bool
+	if s.interp != nil {
+		ro, hidden, _ = managedFormElementStates(form, managedFormHeaderValues(entity, values), newInterpEvaluator(s.interp))
+	}
+	// editable_admin_only не зависит от данных записи, поэтому его нет в
+	// readonly_when-состояниях. Добавляем здесь: ответ события применяется
+	// клиентом целиком, и без этой записи ложное readonly_when сняло бы запрет
+	// с поля, которое неадминистратору редактировать нельзя.
+	if !admin {
+		for _, name := range adminOnlyElementNames(form) {
+			if ro == nil {
+				ro = make(map[string]bool)
+			}
+			ro[name] = true
+		}
+	}
 	if len(ro) == 0 && len(hidden) == 0 {
 		return nil
 	}
 	return &elementStates{ReadOnly: ro, Hidden: hidden}
+}
+
+// adminOnlyElementNames — элементы формы, запертые для неадминистратора.
+func adminOnlyElementNames(form *metadata.FormModule) []string {
+	if form == nil {
+		return nil
+	}
+	var names []string
+	form.Walk(func(element *metadata.FormElement) bool {
+		if element != nil && element.EditableAdminOnly && strings.TrimSpace(element.Name) != "" {
+			names = append(names, element.Name)
+		}
+		return true
+	})
+	return names
 }
 
 func (s *Server) serializeManagedFormEventState(ctx context.Context, form *metadata.FormModule, entity *metadata.Entity, obj *runtime.Object, rules []metadata.FormCondRule, msgs []string) formEventState {
@@ -1842,7 +1872,7 @@ func (s *Server) serializeManagedFormEventState(ctx context.Context, form *metad
 		// Условия readonly_when/hidden_when считаются здесь же, где известны
 		// значения ПОСЛЕ обработчика: команда, изменившая состояние объекта,
 		// сразу меняет доступность полей.
-		ElementStates: s.formElementStates(form, entity, values),
+		ElementStates: s.formElementStates(form, entity, values, s.isAdminCtx(ctx)),
 	}
 }
 

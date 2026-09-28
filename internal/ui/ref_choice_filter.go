@@ -29,6 +29,9 @@ type resolvedChoiceRequest struct {
 	Predicates []storage.ChoicePredicate
 	Empty      bool
 	Selected   *uuid.UUID
+	// Folders — элемент объявил choice_folders: группы справочника остаются в
+	// выдаче. Признак берётся из метаданных формы, а не из запроса браузера.
+	Folders bool
 }
 
 func findManagedFormByName(owner *metadata.Entity, name string) *metadata.FormModule {
@@ -127,8 +130,19 @@ func choiceSourceControls(element *metadata.FormElement) map[string]string {
 // predicates. Missing known source values fail closed with Empty=true;
 // unknown source names and malformed UUIDs are request errors.
 func choicePredicates(element *metadata.FormElement, sources map[string]string) ([]storage.ChoicePredicate, bool, error) {
-	if element == nil || len(element.ChoiceFilter) == 0 {
-		return nil, false, fmt.Errorf("choice_filter is not declared")
+	if element == nil {
+		return nil, false, fmt.Errorf("choice element is not declared")
+	}
+	// choice_folders живёт и без условий: элемент объявляет только состав
+	// выдачи, отбирать при этом нечего.
+	if len(element.ChoiceFilter) == 0 {
+		if !element.ChoiceFolders {
+			return nil, false, fmt.Errorf("choice_filter is not declared")
+		}
+		if len(sources) > 0 {
+			return nil, false, fmt.Errorf("unexpected choice sources")
+		}
+		return nil, false, nil
 	}
 	allowed := choiceSourceControls(element)
 	for path := range sources {
@@ -245,7 +259,7 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 		return nil, fmt.Errorf("unknown managed form")
 	}
 	element := findChoiceElementByID(form, elementID)
-	if element == nil || len(element.ChoiceFilter) == 0 {
+	if element == nil || (len(element.ChoiceFilter) == 0 && !element.ChoiceFolders) {
 		return nil, fmt.Errorf("unknown choice element")
 	}
 	targetName := formChoiceRefEntity(owner, form, element.DataPath)
@@ -261,7 +275,7 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 		return nil, err
 	}
 
-	resolved := &resolvedChoiceRequest{Predicates: predicates, Empty: empty}
+	resolved := &resolvedChoiceRequest{Predicates: predicates, Empty: empty, Folders: element.ChoiceFolders}
 	if selectedRaw != "" {
 		id, parseErr := uuid.Parse(selectedRaw)
 		if parseErr != nil || id == uuid.Nil {
@@ -272,9 +286,15 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 	return resolved, nil
 }
 
-func (s *Server) choiceSelectedAllowed(ctx context.Context, target *metadata.Entity, id uuid.UUID, predicates []storage.ChoicePredicate) (bool, error) {
+func (s *Server) choiceSelectedAllowed(ctx context.Context, target *metadata.Entity, id uuid.UUID, predicates []storage.ChoicePredicate, folders bool) (bool, error) {
 	params := s.refListParamsForMode(target, refOptionsChoice)
 	params.ChoicePredicates = predicates
+	if folders {
+		// Иначе выбранная группа считалась бы «вне отбора» и поле чистилось бы
+		// при первой же перерисовке — ровно то, из-за чего choice_folders и нужен.
+		params.IncludeFolders = true
+		params.ExcludeFolders = false
+	}
 	var err error
 	params, err = s.rowFilterFor(ctx, target, "read", params)
 	if err != nil {
@@ -329,6 +349,7 @@ func (s *Server) initialChoiceOptions(ctx context.Context, target *metadata.Enti
 		rows, err = s.referenceOptionsWithParams(ctx, target, refOptionsChoice, storage.ListParams{
 			Limit:            refPickerDefaultLimit,
 			ChoicePredicates: predicates,
+			IncludeFolders:   element.ChoiceFolders,
 		})
 		if err != nil {
 			return nil, err
@@ -341,7 +362,7 @@ func (s *Server) initialChoiceOptions(ctx context.Context, target *metadata.Enti
 	allowed := false
 	if !empty {
 		if id, parseErr := uuid.Parse(selected); parseErr == nil && id != uuid.Nil {
-			allowed, err = s.choiceSelectedAllowed(ctx, target, id, predicates)
+			allowed, err = s.choiceSelectedAllowed(ctx, target, id, predicates, element.ChoiceFolders)
 			if err != nil {
 				return nil, err
 			}
@@ -363,7 +384,10 @@ func (s *Server) applyManagedChoiceFilters(ctx context.Context, owner *metadata.
 	options := make(map[string][]map[string]any)
 	contexts := make(map[string]string)
 	form.Walk(func(element *metadata.FormElement) bool {
-		if element == nil || len(element.ChoiceFilter) == 0 || strings.TrimSpace(element.ID) == "" {
+		if element == nil || strings.TrimSpace(element.ID) == "" {
+			return true
+		}
+		if len(element.ChoiceFilter) == 0 && !element.ChoiceFolders {
 			return true
 		}
 		targetName := formChoiceRefEntity(owner, form, element.DataPath)
