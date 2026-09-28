@@ -532,6 +532,14 @@ func analyzeIssues(result *report, issues []apiIssue, prs []apiPull, owner strin
 		}
 
 		labels := labelSet(issue.Labels)
+		if labels["ready-fix"] && labels["needs-decision"] && !labels["approved"] {
+			result.addIssue("yellow", "issue_route_conflict", issue.Number,
+				"ready-fix конфликтует с needs-decision: автоматический FIX остановлен до явного решения")
+		}
+		if labels["manual"] && (labels["approved"] || labels["ready-fix"] || labels["plan-needed"] || labels["in-work"]) {
+			result.addIssue("yellow", "manual_route_conflict", issue.Number,
+				"manual сочетается с автоматической маршрутной меткой, которая не будет исполнена")
+		}
 		route := inspectTriageRoute(issue, owner)
 		routeFinding := false
 		routeMismatch := false
@@ -784,12 +792,18 @@ func checkContract(result *report, path string) {
 	if err != nil || !strings.Contains(text, "pp:base-sync-done") ||
 		!strings.Contains(text, "single-flight-барьер") ||
 		!strings.Contains(string(mergeData), "pp:base-sync-intent") ||
-		!strings.Contains(string(mergeData), "pp:merge-cleanup-intent") ||
-		!strings.Contains(string(mergeData), "complete merge-cleanup") ||
 		!strings.Contains(string(mergeData), "повторный человеческий `ship` при валидной") ||
 		!strings.Contains(string(mergeData), "single-flight-барьер") {
 		result.add("red", "unsafe_base_sync_contract", 0,
 			"активные REVIEW/MERGE contracts не гарантируют перенос ship и single-flight через доказанный base-sync")
+		return
+	}
+	// Гарантии merge-cleanup отвечают за отдельный шаг — их поломка не должна
+	// маскироваться под проблему переноса ship/base-sync (#1524).
+	if !strings.Contains(string(mergeData), "pp:merge-cleanup-intent") ||
+		!strings.Contains(string(mergeData), "complete merge-cleanup") {
+		result.add("red", "unsafe_merge_cleanup_contract", 0,
+			"в merge-shepherd contract нет гарантий merge-cleanup (pp:merge-cleanup-intent / complete merge-cleanup)")
 		return
 	}
 	for _, name := range []string{"triage-issues", "plan-approved", "fix-approved", "review-queue", "merge-shepherd", "tail-issues"} {
