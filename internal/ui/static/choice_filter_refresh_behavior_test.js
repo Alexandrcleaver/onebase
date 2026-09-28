@@ -77,6 +77,7 @@ function runtime(fetchImpl, selected, withOwner, withChoice = true) {
   const window = {fetch: fetchImpl, AbortController: globalThis.AbortController};
   const sandbox = {
     window,
+    fetch: fetchImpl,
     document,
     Event: class Event { constructor(type, options) { this.type = type; this.bubbles = !!(options && options.bubbles); } },
     AbortController: globalThis.AbortController,
