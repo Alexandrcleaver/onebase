@@ -1024,12 +1024,30 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
       // optimistic version before any renderer, picker or message callback can
       // throw, so a later queued action updates the row instead of inserting it.
       applySavedIdentity(data);
+      // Навигация (#1557): переход только у инициатора, адрес построен
+      // сервером. Несохранённая форма остаётся на месте — переход отменяется.
+      if (data.navigation && data.navigation.url) {
+        if (window._obFormDirty) {
+          flash('Форма содержит несохранённые изменения — переход не выполнен', 'err');
+          return;
+        }
+        window.location.assign(data.navigation.url);
+        return;
+      }
       // Подбор фазы 1: сервер вернул pickerData — открыть диалог, не трогая
       // ТЧ (её обновит фаза 2 после «Перенести»).
       if (data.pickerData) {
         (data.messages || []).forEach(m => flash(m, 'ok'));
         if (data.error) flash(data.error, 'err');
         openItemPicker(data.pickerData, elementName, extraParams || null);
+        return;
+      }
+      // Вопрос фазы 1 (#1528): открыть модал; ответ вернётся событием Ответ
+      // через _question_answer — сервер положит его в ВопросОтвет.
+      if (data.question) {
+        (data.messages || []).forEach(m => flash(m, 'ok'));
+        if (data.error) flash(data.error, 'err');
+        if (window.obOpenQuestion) window.obOpenQuestion(data.question, elementName);
         return;
       }
       // dirty=true is an authoritative safety signal and must survive a
@@ -1456,11 +1474,16 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
         body = new URLSearchParams(pendingRetry.body);
         snapshotKey = pendingRetry.key;
 		envelope = Object.assign({}, pendingRetry.envelope);
+		// Повтор неизвестного исхода не вправе претендовать на «первую
+		// попытку»: после перезапуска сервера он обязан остаться под фенсом
+		// (reconcile), как и раньше (#1685).
+		envelope.first = '';
       } else {
 		envelope = {
 		  intentId: freshCloseIntentID(),
 		  epoch: CLOSE_EPOCH,
 		  issuedAt: String(closeIssuedAtNow()),
+		  first: '1',
 		  reason: reason,
 		  mode: mode,
 		  formKind: closeFormKind(),
@@ -1493,6 +1516,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
 			'X-OneBase-Close-Intent': intentID,
 			'X-OneBase-Close-Epoch': String(envelope.epoch || ''),
 			'X-OneBase-Close-Issued-At': String(envelope.issuedAt || ''),
+			'X-OneBase-Close-First-Attempt': String(envelope.first || ''),
 			'X-OneBase-Close-Reason': reason,
 			'X-OneBase-Close-Mode': mode,
 			'X-OneBase-Form-Kind': String(envelope.formKind || ''),
