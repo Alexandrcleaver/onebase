@@ -648,6 +648,67 @@ func (rd refDimInfo) displayCol() string {
 	return rd.joinAlias + ".наименование"
 }
 
+// systemRefQualifierAt возвращает ссылочный реквизит на системную таблицу
+// учётных записей, если токен pos — его имя и вместо него уже выпущен
+// псевдоним авто-JOIN с точкой («ref_автор .»). Иначе nil: одноимённый алиас
+// источника или обычная колонка сюда не попадают.
+func (tr *translator) systemRefQualifierAt(pos int) *refDimInfo {
+	if pos < 0 || pos >= len(tr.tokens) || tr.tokens[pos].kind != tIdent {
+		return nil
+	}
+	rd := tr.findRefDim(lowerFast(tr.tokens[pos].val))
+	if rd == nil || !metadata.IsSystemRefTarget(rd.refEntity) {
+		return nil
+	}
+	n := len(tr.parts)
+	if n < 2 || tr.parts[n-1] != "." || tr.parts[n-2] != rd.joinAlias {
+		return nil
+	}
+	return rd
+}
+
+// systemRefAttributeSQL сопоставляет имя реквизита учётной записи выражению
+// над псевдонимом авто-JOIN. Наименование совпадает с представлением ссылки
+// (displayCol); Логин и ПолноеИмя — то, что и так показывает подбор учёток.
+// Колонки аутентификации (хеш пароля, секрет второго фактора, признак
+// администратора, привязка к внешнему провайдеру) не читаются никогда.
+func systemRefAttributeSQL(rd *refDimInfo, name string) (string, bool) {
+	switch lowerFast(name) {
+	case "наименование", "description", "представление", "presentation":
+		return rd.displayCol(), true
+	case "логин", "login":
+		return rd.joinAlias + ".login", true
+	case "полноеимя", "fullname":
+		return rd.joinAlias + ".full_name", true
+	}
+	return "", false
+}
+
+// emitSystemRefAttribute заменяет выпущенное «ref_x .» выражением реквизита
+// учётной записи. В списке выборки без явного КАК выражение получает имя
+// реквизита, как оно написано в запросе: иначе колонка результата называлась
+// бы login или coalesce, и Выборка.Логин её не находила.
+func (tr *translator) emitSystemRefAttribute(rd *refDimInfo, field, name string) error {
+	expr, ok := systemRefAttributeSQL(rd, name)
+	if !ok {
+		// Ключ — одним литералом: i18ncheck собирает ключи из исходника.
+		return i18nerr.Errorf(
+			"у ссылки на учётную запись в запросе доступны только Ссылка, Наименование, Логин и ПолноеИмя: «%s.%s» недоступно",
+			field, name)
+	}
+	tr.parts = tr.parts[:len(tr.parts)-2]
+	tr.emit(expr)
+	if tr.section == sectionSelect {
+		if p := upperFast(tr.peek(0).val); p != "КАК" && p != "AS" {
+			alias := lowerFast(name)
+			tr.emit("AS")
+			tr.emit(alias)
+			tr.aliases[alias] = struct{}{}
+		}
+	}
+	return nil
+}
+
 type translator struct {
 	tokens       []tok
 	pos          int
@@ -4446,6 +4507,21 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 					tr.emit(tr.qualifyReference("id"))
 				}
 				continue
+			}
+			// Учётная запись входа (reference:_users, #1646) — системная таблица,
+			// а не сущность конфигурации: источником прав она сознательно не
+			// регистрируется, поэтому через точку читается только объявленное —
+			// Ссылка (выше), Наименование, Логин и ПолноеИмя. Раньше любое имя
+			// уходило в SQL дословно, и «Автор.password_hash» с «Автор.totp_secret»
+			// отдавали хеш пароля и секрет второго фактора любому запросу, в том
+			// числе ИИ-помощнику, работающему от имени не-администратора.
+			if prevDot {
+				if rd := tr.systemRefQualifierAt(tr.pos - 3); rd != nil {
+					if err := tr.emitSystemRefAttribute(rd, tr.tokens[tr.pos-3].val, t.val); err != nil {
+						return Result{}, err
+					}
+					continue
+				}
 			}
 			// Системные колонки регистра — PascalCase русские алиасы
 			// (см. systemColAlias). Работает и с префиксом (Х.Период), и без,
