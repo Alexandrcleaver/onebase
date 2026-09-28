@@ -1026,13 +1026,20 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
       applySavedIdentity(data);
       // Навигация (#1557): переход только у инициатора, адрес построен
       // сервером. Несохранённая форма остаётся на месте — переход отменяется.
+      // Решает состояние формы ПОСЛЕ этого ответа, а не до него. dirty=true
+      // значит, что обработчик изменил объект перед ОткрытьФорму, а флаг формы
+      // ещё не поднят. dirty=false вместе с savedId/version доказывает запись
+      // в этом же ответе — форма чиста, даже если до обработчика её правили.
+      // При отмене ответ применяется целиком — пользователь видит изменения,
+      // ради которых переход не выполнен, — и сообщение идёт последним.
+      var navigationBlocked = false;
       if (data.navigation && data.navigation.url) {
-        if (window._obFormDirty) {
-          flash('Форма содержит несохранённые изменения — переход не выполнен', 'err');
+        var savedByResponse = data.dirty === false && !!(data.savedId || data.version);
+        if (data.dirty !== true && (!window._obFormDirty || savedByResponse)) {
+          window.location.assign(data.navigation.url);
           return;
         }
-        window.location.assign(data.navigation.url);
-        return;
+        navigationBlocked = true;
       }
       // Подбор фазы 1: сервер вернул pickerData — открыть диалог, не трогая
       // ТЧ (её обновит фаза 2 после «Перенести»).
@@ -1067,6 +1074,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
 	  if (data.dirty === false && (data.savedId || data.version)) window.obSetManagedFormDirty(false);
       (data.messages || []).forEach(m => flash(m, 'ok'));
       if (data.error) flash(data.error, 'err');
+      if (navigationBlocked) flash('Форма содержит несохранённые изменения — переход не выполнен', 'err');
     } catch (e) {
       // A lost/unparseable response for /new may hide a committed insert and
       // there is no identity with which to issue another safe write. Fence all
