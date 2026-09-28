@@ -153,13 +153,15 @@ func newChoiceHTTPFixture(t *testing.T) choiceHTTPFixture {
 	reg.Load(runtime.LoadOptions{Entities: entities})
 	user := &auth.User{Login: "anna", Roles: []*auth.Role{{Permissions: auth.Permission{
 		Catalogs:  map[string][]string{direction.Name: {"read"}, target.Name: {"read"}},
-		Documents: map[string][]string{owner.Name: {"read"}},
+		Documents: map[string][]string{owner.Name: {"read", "write"}},
 		RowAccess: auth.RowAccess{Catalogs: map[string]auth.RowPolicies{
 			target.Name: {"read": {Field: "Аудитория", Op: "eq", Value: auth.RowValue{User: "login"}}},
 		}},
 	}}}}
+	server := &Server{reg: reg, store: db}
+	server.entitySvc = server.newEntityService(nil)
 	return choiceHTTPFixture{
-		server: &Server{reg: reg, store: db}, direction: direction, target: target, owner: owner,
+		server: server, direction: direction, target: target, owner: owner,
 		rootA: rootA, rootB: rootB, pageTwo: choiceHTTPUUID(0x20, 51), hidden: hidden,
 		legacySelected: legacySelected, foreignOther: foreignOther, ownerID: ownerID, user: user,
 	}
@@ -393,6 +395,32 @@ func TestManagedChoiceFilterInitialRenderKeepsOnlyMarkedLegacyValue(t *testing.T
 	}
 	if legacyCount != 1 || foreignOther {
 		t.Fatalf("legacy/foreign options: selected count=%d foreign other=%v", legacyCount, foreignOther)
+	}
+}
+
+func TestManagedChoiceFilterLegacyValueSurvivesOrdinarySave(t *testing.T) {
+	f := newChoiceHTTPFixture(t)
+	body := url.Values{
+		"Направление":   {f.rootA.String()},
+		"Неисправность": {f.legacySelected.String()},
+		"_action":       {""},
+	}
+	request := reqWithChi(http.MethodPost,
+		"/ui/document/"+url.PathEscape(f.owner.Name)+"/"+f.ownerID.String(), body,
+		map[string]string{"entity": f.owner.Name, "id": f.ownerID.String()})
+	request = request.WithContext(auth.ContextWithUser(request.Context(), f.user))
+	recorder := httptest.NewRecorder()
+	f.server.submitEdit(recorder, request)
+	if recorder.Code != http.StatusSeeOther {
+		t.Fatalf("ordinary save status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	stored, err := f.server.store.GetByID(context.Background(), f.owner.Name, f.ownerID, f.owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(stored["Неисправность"]); got != f.legacySelected.String() {
+		t.Fatalf("ordinary save erased legacy outside-filter value: got %q, want %s", got, f.legacySelected)
 	}
 }
 
