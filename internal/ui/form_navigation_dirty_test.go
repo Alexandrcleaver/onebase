@@ -163,7 +163,7 @@ const blocked = 'Форма содержит несохранённые изме
 	if err := os.WriteFile(harnessPath, []byte(harness), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(node, harnessPath, managedPath).CombinedOutput()
+	out, err := exec.Command(node, harnessPath, managedPath).CombinedOutput() //nolint:gosec // test-only executable resolved by exec.LookPath
 	if err != nil {
 		t.Fatalf("стенд managed.js: %v\n%s", err, out)
 	}
