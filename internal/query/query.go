@@ -685,20 +685,22 @@ func systemRefAttributeSQL(rd *refDimInfo, name string) (string, bool) {
 }
 
 // emitSystemRefAttribute заменяет выпущенное «ref_x .» выражением реквизита
-// учётной записи. В списке выборки без явного КАК выражение получает имя
-// реквизита, как оно написано в запросе: иначе колонка результата называлась
-// бы login или coalesce, и Выборка.Логин её не находила.
-func (tr *translator) emitSystemRefAttribute(rd *refDimInfo, field, name string) error {
+// учётной записи; qpos — позиция токена ссылочного реквизита. Самостоятельный
+// элемент списка выборки без явного КАК получает имя реквизита, как оно
+// написано в запросе: иначе колонка результата называлась бы login или
+// coalesce, и Выборка.Логин её не находила. Внутри выражения имени не нужно,
+// а в аргументе функции оно недопустимо: «MAX(x AS логин)» не разбирается.
+func (tr *translator) emitSystemRefAttribute(rd *refDimInfo, qpos int, name string) error {
 	expr, ok := systemRefAttributeSQL(rd, name)
 	if !ok {
 		// Ключ — одним литералом: i18ncheck собирает ключи из исходника.
 		return i18nerr.Errorf(
 			"у ссылки на учётную запись в запросе доступны только Ссылка, Наименование, Логин и ПолноеИмя: «%s.%s» недоступно",
-			field, name)
+			tr.tokens[qpos].val, name)
 	}
 	tr.parts = tr.parts[:len(tr.parts)-2]
 	tr.emit(expr)
-	if tr.section == sectionSelect {
+	if tr.section == sectionSelect && tr.standaloneSelectItem(qpos, qpos+3) {
 		if p := upperFast(tr.peek(0).val); p != "КАК" && p != "AS" {
 			alias := lowerFast(name)
 			tr.emit("AS")
@@ -707,6 +709,67 @@ func (tr *translator) emitSystemRefAttribute(rd *refDimInfo, field, name string)
 		}
 	}
 	return nil
+}
+
+// systemRefByJoinAlias — ссылочный реквизит на учётные записи, чей псевдоним
+// авто-JOIN совпал с именем из текста запроса. Псевдоним — служебное имя
+// транслятора: через «ref_автор.<колонка>» читалась бы вся строка _users,
+// включая хеш пароля, мимо проверки объявленных реквизитов.
+func (tr *translator) systemRefByJoinAlias(name string) *refDimInfo {
+	for i := range tr.refDims {
+		rd := &tr.refDims[i]
+		if rd.joinAlias == name && metadata.IsSystemRefTarget(rd.refEntity) {
+			return rd
+		}
+	}
+	return nil
+}
+
+// standaloneSelectItem — токены [from, to) составляют целый элемент списка
+// выборки: стоят на глубине его SELECT, перед ними начало списка (ВЫБРАТЬ,
+// РАЗЛИЧНЫЕ, ПЕРВЫЕ N) или запятая списка, после — запятая, КАК, ИЗ или конец
+// вложенного запроса.
+func (tr *translator) standaloneSelectItem(from, to int) bool {
+	ctx, toks := tr.sourceCtx, tr.tokens
+	if from < 1 || to >= len(toks) || from >= len(ctx.tokenDepth) || to >= len(ctx.tokenDepth) {
+		return false
+	}
+	depth := ctx.selectDepthAt(toks, from)
+	if depth < 0 || ctx.tokenDepth[from] != depth {
+		return false
+	}
+	prev := toks[from-1]
+	switch prev.kind {
+	case tComma:
+		if ctx.tokenDepth[from-1] != depth {
+			return false
+		}
+	case tNum, tParam:
+		if from < 2 {
+			return false
+		}
+		if w := upperFast(toks[from-2].val); w != "ПЕРВЫЕ" && w != "TOP" {
+			return false
+		}
+	case tIdent:
+		kw, ok := sqlKW(prev.val)
+		if !ok || (kw != "SELECT" && kw != "DISTINCT" && kw != "ALL") {
+			return false
+		}
+	default:
+		return false
+	}
+	next := toks[to]
+	switch next.kind {
+	case tComma:
+		return ctx.tokenDepth[to] == depth
+	case tRParen, tEOF:
+		return true
+	case tIdent:
+		kw, ok := sqlKW(next.val)
+		return ok && (kw == "AS" || kw == "FROM" || kw == "UNION")
+	}
+	return false
 }
 
 type translator struct {
@@ -800,6 +863,24 @@ func (ctx sourceContext) sectionAt(tokenPos int) querySection {
 		return sectionOther
 	}
 	return ctx.tokenSection[tokenPos]
+}
+
+// selectDepthAt — глубина скобок ключевого слова SELECT той области, в списке
+// выборки которой стоит токен pos; -1, если pos не в списке выборки.
+func (ctx sourceContext) selectDepthAt(tokens []tok, pos int) int {
+	scopeID, ok := ctx.scopeIDAt(pos)
+	if !ok || ctx.sectionAt(pos) != sectionSelect {
+		return -1
+	}
+	for i := pos; i >= 0; i-- {
+		if id, ok := ctx.scopeIDAt(i); !ok || id != scopeID || tokens[i].kind != tIdent {
+			continue
+		}
+		if kw, ok := sqlKW(tokens[i].val); ok && kw == "SELECT" {
+			return ctx.tokenDepth[i]
+		}
+	}
+	return -1
 }
 
 func (ctx sourceContext) isReferenceAliasAt(tokenPos int, lower string) bool {
@@ -4470,6 +4551,18 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 					prevAlias = !prevDot
 				}
 			}
+			// Псевдоним авто-JOIN учётных записей (ref_автор) — служебное имя
+			// транслятора, а не часть языка. Через него читалась бы вся строка
+			// _users мимо проверки объявленных реквизитов ниже, поэтому в
+			// тексте запроса он недоступен в любой позиции, кроме объявления.
+			if !prevDot && !prevAlias {
+				if rd := tr.systemRefByJoinAlias(lower); rd != nil {
+					// Ключ — одним литералом: i18ncheck собирает ключи из исходника.
+					return Result{}, i18nerr.Errorf(
+						"«%s» — служебное имя соединения с учётными записями, в запросе оно недоступно: реквизиты учётной записи читаются через точку от ссылки — Ссылка, Наименование, Логин и ПолноеИмя",
+						t.val)
+				}
+			}
 			// Булевы литералы Истина/Ложь. Без этой ветки они уезжали в SQL как
 			// имена колонок, и естественный отбор `ГДЕ Активен = Истина` падал
 			// «no such column: истина» (issue #704). Слово остаётся именем там,
@@ -4517,7 +4610,7 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 			// числе ИИ-помощнику, работающему от имени не-администратора.
 			if prevDot {
 				if rd := tr.systemRefQualifierAt(tr.pos - 3); rd != nil {
-					if err := tr.emitSystemRefAttribute(rd, tr.tokens[tr.pos-3].val, t.val); err != nil {
+					if err := tr.emitSystemRefAttribute(rd, tr.pos-3, t.val); err != nil {
 						return Result{}, err
 					}
 					continue

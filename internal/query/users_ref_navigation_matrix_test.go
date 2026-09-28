@@ -118,6 +118,11 @@ func TestUsersRefNavigationRejectsAuthColumns(t *testing.T) {
 		`ВЫБРАТЬ З.Автор.password_hash КАК Х ИЗ Документ.Заявка КАК З`,
 		`ВЫБРАТЬ Номер ИЗ Документ.Заявка ГДЕ Автор.password_hash ПОДОБНО "$2%"`,
 		`ВЫБРАТЬ Номер ИЗ Документ.Заявка УПОРЯДОЧИТЬ ПО Автор.auth_subject`,
+		// Псевдоним авто-JOIN — служебное имя: через него читалась бы вся
+		// строка _users, как только соединение появилось ради Автор.Логин.
+		`ВЫБРАТЬ ref_автор.password_hash КАК Х ИЗ Документ.Заявка ГДЕ Автор.Логин = "boss"`,
+		`ВЫБРАТЬ Номер ИЗ Документ.Заявка ГДЕ Автор.Логин <> "" И REF_АВТОР.totp_secret <> ""`,
+		`ВЫБРАТЬ Автор.Логин ИЗ Документ.Заявка УПОРЯДОЧИТЬ ПО ref_автор.password_hash`,
 	} {
 		for _, dialect := range []storage.Dialect{storage.SQLiteDialect{}, storage.PgDialect{}} {
 			res, err := query.Compile(text, query.CompileOpts{Dialect: dialect, Entities: []*metadata.Entity{заявка}})
@@ -130,6 +135,78 @@ func TestUsersRefNavigationRejectsAuthColumns(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Имя реквизита достаётся колонке, только когда реквизит — целый элемент
+// списка выборки. В аргументе агрегата «AS логин» давало бы MAX(x AS логин) —
+// синтаксическую ошибку на обоих диалектах.
+func TestUsersRefAttributeInsideExpressions(t *testing.T) {
+	dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+		ctx := context.Background()
+		repo := auth.NewRepo(db)
+		if err := repo.EnsureSchema(ctx); err != nil {
+			t.Fatalf("EnsureSchema: %v", err)
+		}
+		ivanov, err := repo.Create(ctx, "ivanov", "пароль-123456", "Иванов И.И.", true)
+		if err != nil {
+			t.Fatalf("Create ivanov: %v", err)
+		}
+		petrov, err := repo.Create(ctx, "petrov", "пароль-654321", "", false)
+		if err != nil {
+			t.Fatalf("Create petrov: %v", err)
+		}
+		заявка := usersRefEntity()
+		if err := db.Migrate(ctx, []*metadata.Entity{заявка}); err != nil {
+			t.Fatalf("Migrate: %v", err)
+		}
+		for номер, автор := range map[string]string{"0001": ivanov.ID, "0002": petrov.ID, "0003": petrov.ID} {
+			if err := db.Upsert(ctx, заявка.Name, uuid.New(), map[string]any{"Номер": номер, "Автор": автор}, заявка); err != nil {
+				t.Fatalf("Upsert %s: %v", номер, err)
+			}
+		}
+		run := func(text string) []map[string]any {
+			t.Helper()
+			compiled, err := query.Compile(text, query.CompileOpts{Dialect: db.Dialect(), Entities: []*metadata.Entity{заявка}})
+			if err != nil {
+				t.Fatalf("%s: компиляция: %v", text, err)
+			}
+			rows, _, err := query.Run(ctx, db, &compiled)
+			if err != nil {
+				t.Fatalf("%s: выполнение: %v\nSQL: %s", text, err, compiled.SQL)
+			}
+			return rows
+		}
+
+		for _, c := range []struct{ text, col, want string }{
+			{`ВЫБРАТЬ МАКСИМУМ(Автор.Логин) КАК Л ИЗ Документ.Заявка`, "л", "petrov"},
+			{`ВЫБРАТЬ МИНИМУМ(Автор.Наименование) КАК Н ИЗ Документ.Заявка`, "н", "petrov"},
+			{`ВЫБРАТЬ КОЛИЧЕСТВО(РАЗЛИЧНЫЕ Автор.Логин) КАК Ч ИЗ Документ.Заявка`, "ч", "2"},
+			// Целый элемент после модификатора — по-прежнему с именем реквизита.
+			{`ВЫБРАТЬ ПЕРВЫЕ 1 Автор.Логин ИЗ Документ.Заявка УПОРЯДОЧИТЬ ПО Номер`, "логин", "ivanov"},
+		} {
+			rows := run(c.text)
+			if len(rows) != 1 {
+				t.Fatalf("%s: строк %d, ожидалась 1: %v", c.text, len(rows), rows)
+			}
+			if got := fmt.Sprint(rows[0][c.col]); got != c.want {
+				t.Errorf("%s: %s = %q, want %q (row %v)", c.text, c.col, got, c.want, rows[0])
+			}
+		}
+
+		distinct := run(`ВЫБРАТЬ РАЗЛИЧНЫЕ Автор.Логин ИЗ Документ.Заявка`)
+		if len(distinct) != 2 {
+			t.Fatalf("РАЗЛИЧНЫЕ: строк %d, ожидалось 2: %v", len(distinct), distinct)
+		}
+		for _, row := range distinct {
+			if _, ok := row["логин"]; !ok {
+				t.Errorf("РАЗЛИЧНЫЕ: колонка не названа именем реквизита: %v", row)
+			}
+		}
+		// Агрегат без КАК тоже исполним: колонку называет СУБД, но запрос цел.
+		if rows := run(`ВЫБРАТЬ МАКСИМУМ(Автор.Логин) ИЗ Документ.Заявка`); len(rows) != 1 {
+			t.Fatalf("агрегат без КАК: строк %d, ожидалась 1", len(rows))
+		}
+	})
 }
 
 func usersRefID(v any) string {
