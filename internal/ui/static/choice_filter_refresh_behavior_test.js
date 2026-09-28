@@ -4,7 +4,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync('static/ui.js', 'utf8');
-const start = source.indexOf('function obRefChoiceSnapshot(sel)');
+const start = source.indexOf('function obRefFilterValues(sel)');
 const end = source.indexOf('function openRefPicker(selOrId)', start);
 if (start < 0 || end < 0) throw new Error('choice_filter refresh block is absent from ui.js');
 const refreshSource = source.slice(start, end);
@@ -20,9 +20,10 @@ function response(data) {
   return {ok: true, status: 200, json: async () => data};
 }
 
-function runtime(fetchImpl, selected) {
+function runtime(fetchImpl, selected, withOwner) {
   const listeners = {};
   const sourceControl = {value: 'warehouse-a'};
+  const ownerControl = {value: 'contractor-a'};
   const attrs = {
     'data-ref-choice-context': JSON.stringify({
       form_entity: 'Инвентаризация',
@@ -32,6 +33,7 @@ function runtime(fetchImpl, selected) {
     }),
     'data-ref-entity': 'МестоХранения',
   };
+  if (withOwner) attrs['data-ref-filter'] = JSON.stringify({Владелец: {from: 'Контрагент', value: ownerControl.value}});
   const select = {
     options: [
       {value: '', textContent: '— выбрать —'},
@@ -62,7 +64,8 @@ function runtime(fetchImpl, selected) {
     querySelectorAll(selector) {
       return selector === 'select[data-ref-choice-context]' ? [select] : [];
     },
-    getElementsByName(name) { return name === 'Склад' ? [sourceControl] : []; },
+    getElementsByName(name) { return name === 'Склад' ? [sourceControl] : name === 'Контрагент' ? [ownerControl] : []; },
+    querySelector(selector) { return selector.includes('Контрагент') ? ownerControl : null; },
     getElementById() { return null; },
     createElement(tag) { return {tagName: String(tag).toUpperCase(), value: '', textContent: ''}; },
     createEvent() { return {initEvent() {}}; },
@@ -87,8 +90,36 @@ function runtime(fetchImpl, selected) {
   vm.createContext(sandbox);
   vm.runInContext(refreshSource, sandbox, {filename: 'ui.js#choice-filter-refresh'});
   ready();
-  return {api: sandbox, attrs, select, sourceControl};
+  return {api: sandbox, attrs, select, sourceControl, ownerControl};
 }
+
+test('owner and choice refresh stay together through A→B→A responses', async () => {
+  const a1 = deferred();
+  const b = deferred();
+  const a2 = deferred();
+  const calls = [];
+  const env = runtime((url) => {
+    calls.push(url);
+    return [a1, b, a2][calls.length - 1].promise;
+  }, '', true);
+  const first = env.api.obRefreshChoiceSelect(env.select, true);
+  env.ownerControl.value = 'contractor-b';
+  const second = env.api.obRefreshChoiceSelect(env.select, false);
+  b.resolve(response({items: [{id: 'b-location', _label: 'B'}], total: 1}));
+  await second;
+  env.ownerControl.value = 'contractor-a';
+  const third = env.api.obRefreshChoiceSelect(env.select, false);
+  a2.resolve(response({items: [{id: 'latest-a', _label: 'Latest A'}], total: 1}));
+  await third;
+  a1.resolve(response({items: [{id: 'stale-a', _label: 'Stale A'}], total: 1}));
+  await first;
+  assert.equal(calls.length, 3);
+  for (const url of calls) {
+    assert.match(url, /sources=/);
+    assert.match(url, /flt=/);
+  }
+  assert.deepEqual(env.select.options.map((option) => option.value), ['', 'latest-a']);
+});
 
 test('a slower stale source response cannot overwrite the latest source', async () => {
   const first = deferred();

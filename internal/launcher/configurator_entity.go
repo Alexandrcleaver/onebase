@@ -159,6 +159,40 @@ func (h *handler) findEntityConfigFile(ctx context.Context, b *Base, entityName 
 }
 
 func applyFieldEdits(ent *saveEntity, kind metadata.Kind, fields []saveField, tpFields map[string][]saveField, posting *bool, postCaption *string, postAndCloseHidden *bool, hierarchical *bool, owner *string, basedOn *[]string, activity **saveActivity, numerator **saveNumerator) {
+	// «Владелец» синтезируется при загрузке owner: и попадает в форму как
+	// обычный реквизит. В исходном YAML его может не быть: тогда сохраняем
+	// служебный id до выдачи новых f_*, а при снятии owner убираем только
+	// синтезированное поле. Явно объявленный реквизит оставляем пользователю.
+	ownerWasExplicit := false
+	for _, f := range ent.Fields {
+		if strings.EqualFold(f.Name, metadata.StandardOwnerField) && f.ID != metadata.StandardOwnerFieldID {
+			ownerWasExplicit = true
+			break
+		}
+	}
+	if owner != nil {
+		ent.Owner = strings.TrimSpace(*owner)
+	}
+	if kind == metadata.KindCatalog && !ownerWasExplicit {
+		if ent.Owner == "" {
+			kept := fields[:0]
+			for _, f := range fields {
+				if !strings.EqualFold(f.Name, metadata.StandardOwnerField) {
+					kept = append(kept, f)
+				}
+			}
+			fields = kept
+		} else {
+			ent.Fields = withStandardFieldSeed(ent.Fields, metadata.StandardOwnerField, metadata.StandardOwnerFieldID)
+		}
+	}
+	if kind == metadata.KindCatalog && ent.Owner != "" {
+		for i := range fields {
+			if strings.EqualFold(fields[i].Name, metadata.StandardOwnerField) {
+				fields[i].Type = "reference:" + ent.Owner
+			}
+		}
+	}
 	// Устойчивые id (план 81) переносим из прежнего состояния файла и выдаём
 	// новым реквизитам — иначе редактор стирал бы их при каждом сохранении.
 	// Стандартное поле («Код» справочника, «Номер» документа) в файле не лежит,
@@ -205,11 +239,6 @@ func applyFieldEdits(ent *saveEntity, kind metadata.Kind, fields []saveField, tp
 		if !*hierarchical {
 			ent.HierarchyKind = ""
 		}
-	}
-	if owner != nil {
-		// Подчинение справочника (1С «Владелец»). Пустая строка снимает его:
-		// omitempty убирает ключ из YAML целиком.
-		ent.Owner = strings.TrimSpace(*owner)
 	}
 	if basedOn != nil {
 		// nil-slice → based_on удаляется из YAML (omitempty); пустой

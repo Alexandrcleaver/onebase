@@ -90,8 +90,16 @@ type rawEntity struct {
 	Numerator          *rawNumerator     `yaml:"numerator"`
 	// Presentation принимает и строку, и список: «одно поле» — частый случай,
 	// а список задаёт запасной вариант, если основной реквизит пуст.
-	Presentation stringOrList    `yaml:"presentation"`
-	Predefined   []rawPredefined `yaml:"predefined"`
+	Presentation stringOrList `yaml:"presentation"`
+	// OrderBy — порядок списка по умолчанию (см. Entity.OrderBy). Принимает и
+	// строку, и список: «одно поле» — частый случай.
+	OrderBy stringOrList `yaml:"order_by"`
+	// ChoicePreview — реквизит, показываемый в области просмотра формы выбора.
+	ChoicePreview string `yaml:"choice_preview"`
+	// ChoicePreviewProc — «Модуль.Функция», собирающая тексты просмотра с учётом
+	// контекста подбора (Entity.ChoicePreviewProc).
+	ChoicePreviewProc string          `yaml:"choice_preview_proc"`
+	Predefined        []rawPredefined `yaml:"predefined"`
 	// Owner — справочник-владелец (1С: подчинённый справочник). См. Entity.Owner.
 	Owner         string   `yaml:"owner"`
 	Hierarchical  bool     `yaml:"hierarchical"`
@@ -298,6 +306,9 @@ func LoadFile(path string, kind Kind) (*Entity, error) {
 		e.Stages = st
 	}
 	e.Presentation = raw.Presentation.values()
+	e.OrderBy = raw.OrderBy.values()
+	e.ChoicePreview = strings.TrimSpace(raw.ChoicePreview)
+	e.ChoicePreviewProc = strings.TrimSpace(raw.ChoicePreviewProc)
 	if raw.Numerator != nil {
 		n := &Numerator{
 			Prefix:     raw.Numerator.Prefix,

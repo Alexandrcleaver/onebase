@@ -19,8 +19,8 @@ import (
 // ссылающегося на справочник-владелец; таких реквизитов должно быть ровно
 // один — иначе отбор не ставится вовсе (см. ownerHolderField).
 //
-// Связи параметров выбора (`choice_filter`, план 170) едут отдельным
-// контрактом choice и в этот механизм не входят.
+// Если у поля есть также choice_filter (план 170), сервер применяет оба
+// ограничения одним запросом и проверяет выбранное значение по их пересечению.
 // Значение отбора берётся дважды и намеренно:
 //   • на сервере (варианты <select> первой отрисовки) — из значений формы;
 //   • на клиенте (диалог подбора и перестроение списка) — из живого поля на
@@ -124,6 +124,23 @@ func (s *Server) refFilterMap(holder *metadata.Entity, form *metadata.FormModule
 				continue
 			}
 			add(a.Name, metadata.StandardOwnerField, refFilterSource{From: hf.Name, Value: strings.TrimSpace(values[hf.Name])})
+		}
+	}
+	// Ссылочные колонки табличных частей выбираются в контексте того же
+	// объекта. Ключ с именем ТЧ отделяет их от одноимённых полей шапки.
+	if holder != nil {
+		for _, tp := range holder.TableParts {
+			for _, f := range tp.Fields {
+				target := s.reg.GetEntity(f.RefEntity)
+				if target == nil || strings.TrimSpace(target.Owner) == "" {
+					continue
+				}
+				hf, ok := ownerHolderField(holder, target.Owner)
+				if !ok {
+					continue
+				}
+				add(tp.Name+"."+f.Name, metadata.StandardOwnerField, refFilterSource{From: hf.Name, Value: strings.TrimSpace(values[hf.Name])})
+			}
 		}
 	}
 
