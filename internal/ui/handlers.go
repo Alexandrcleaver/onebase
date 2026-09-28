@@ -115,6 +115,63 @@ func (s *Server) usersForSelection(ctx context.Context) []map[string]any {
 	return rows
 }
 
+// usersForSelectionIncluding — варианты выбора учётных записей для поля типа
+// reference:_users, дополненные выбранными значениями (issue #1646).
+//
+// usersForSelection отдаёт только show_in_list: флаг прячет служебные учётки
+// из подбора. Но ссылка на скрытого пользователя может уже стоять в объекте —
+// например, автор документа. Без догрузки такой <option> в <select> нет, и
+// клиентский applyValues ставит selectedIndex=-1: поле выглядит пустым, а
+// следующая запись молча затирает ссылку (тот же механизм, что #615).
+func (s *Server) usersForSelectionIncluding(ctx context.Context, selected []string) []map[string]any {
+	rows := s.usersForSelection(ctx)
+	if s.authRepo == nil {
+		return rows
+	}
+	seen := make(map[string]bool, len(rows)+len(selected))
+	for _, row := range rows {
+		if id := refValueString(row["id"]); id != "" {
+			seen[id] = true
+		}
+	}
+	for _, idStr := range selected {
+		idStr = strings.TrimSpace(idStr)
+		if idStr == "" || seen[idStr] {
+			continue
+		}
+		if row := s.userSelectionRow(ctx, idStr); row != nil {
+			rows = append(rows, row)
+			seen[refValueString(row["id"])] = true
+		}
+	}
+	return rows
+}
+
+// userSelectionRow — один <option> учётной записи по идентификатору: нужен,
+// когда выбранная учётка скрыта флагом show_in_list и в общем списке подбора
+// её нет (см. usersForSelectionIncluding). Неизвестный идентификатор → nil.
+func (s *Server) userSelectionRow(ctx context.Context, idStr string) map[string]any {
+	if s.authRepo == nil {
+		return nil
+	}
+	idStr = strings.TrimSpace(idStr)
+	if idStr == "" {
+		return nil
+	}
+	if _, err := uuid.Parse(idStr); err != nil {
+		return nil
+	}
+	u, err := s.authRepo.GetByID(ctx, idStr)
+	if err != nil || u == nil {
+		return nil
+	}
+	label := u.Login
+	if u.FullName != "" {
+		label = u.FullName
+	}
+	return map[string]any{"id": u.ID, "_label": label}
+}
+
 type refOptionsMode int
 
 const (
@@ -253,7 +310,7 @@ func (s *Server) loadInitialRefOptions(ctx context.Context, entity *metadata.Ent
 			continue
 		}
 		if f.RefEntity == "_users" {
-			opts[f.Name] = s.usersForSelection(ctx)
+			opts[f.Name] = s.usersForSelectionIncluding(ctx, []string{values[f.Name]})
 			continue
 		}
 		refEntity := s.reg.GetEntity(f.RefEntity)
@@ -273,6 +330,10 @@ func (s *Server) loadInitialRefFilterOptions(ctx context.Context, entity *metada
 	opts := make(map[string][]map[string]any)
 	for _, f := range entity.Fields {
 		if f.RefEntity == "" {
+			continue
+		}
+		if f.RefEntity == "_users" {
+			opts[f.Name] = s.usersForSelectionIncluding(ctx, []string{params.Filters[f.Name].Value})
 			continue
 		}
 		refEntity := s.reg.GetEntity(f.RefEntity)
@@ -297,6 +358,10 @@ func (s *Server) loadInitialTPRefOptions(ctx context.Context, entity *metadata.E
 				continue
 			}
 			tpOpts[f.Name] = []map[string]any{}
+			if f.RefEntity == "_users" {
+				tpOpts[f.Name] = s.usersForSelectionIncluding(ctx, selectedTPRefIDs(tpRows[tp.Name], f.Name))
+				continue
+			}
 			refEntity := s.reg.GetEntity(f.RefEntity)
 			if refEntity == nil {
 				continue
