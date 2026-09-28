@@ -372,6 +372,37 @@ test('снятая отметка забывается и в «Перенест�
   assert.deepEqual(JSON.parse(choice.params._pick_result), []);
 });
 
+test('ОдинВыбор с серверным поиском сохраняет клик и заменяет выбор в следующей выдаче', () => {
+  const ctx = pickerContext();
+  const config = {title: 'Подбор', serverSearch: true, single: true};
+  const first = ctx.open({columns, rows, config}, 'КнопкаНайти', null);
+  ctx.rowsOf()[0].dispatch('click', {target: ctx.rowsOf()[0]});
+  assert.deepEqual(ctx.state().order, ['u-1'], 'клик по строке не запомнил radio');
+
+  first.search.value = 'следующая';
+  first.search.dispatch('input');
+  ctx.flush();
+  ctx.respond({columns, rows: [{id: 'u-2', data: {Номер: 'ЗАЯ-000002'}}], config}, 'КнопкаНайти', null);
+  const next = ctx.rowsOf()[0];
+  const radio = next.querySelector('._ip-cb');
+  radio.checked = true;
+  radio.onchange();
+  assert.deepEqual(ctx.state().order, ['u-2'], 'radio сохранил старую строку вместе с новой');
+  ctx.transfer();
+  const choice = ctx.fired.find((f) => f.event === 'Выбор');
+  assert.deepEqual(JSON.parse(choice.params._pick_result).map((row) => row.id), ['u-2']);
+});
+
+test('ОдинВыбор с серверным поиском отправляет кликнутую строку', () => {
+  const ctx = pickerContext();
+  ctx.open({columns, rows, config: {serverSearch: true, single: true}}, 'КнопкаНайти', null);
+  const tr = ctx.rowsOf()[0];
+  tr.dispatch('click', {target: tr});
+  ctx.transfer();
+  const choice = ctx.fired.find((f) => f.event === 'Выбор');
+  assert.deepEqual(JSON.parse(choice.params._pick_result).map((row) => row.id), ['u-1']);
+});
+
 test('пустой ответ поиска не держит очередь: следующий запрос уходит', () => {
   const ctx = pickerContext();
   const config = {title: 'Подбор', serverSearch: true};

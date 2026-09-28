@@ -3633,6 +3633,7 @@ function openItemPicker(payload, elementName, eventContext, request) {
       tr.addEventListener('click', function (e) {
         if (e.target === cb) return;
         cb.checked = true;
+        if (serverSearch) rememberRow(tr);
         updateCounter();
       });
     }
@@ -3791,6 +3792,11 @@ function openItemPicker(payload, elementName, eventContext, request) {
     var cb = tr.querySelector('._ip-cb');
     var known = Object.prototype.hasOwnProperty.call(obPickerSearch.picked, id);
     if (cb && cb.checked) {
+      if (single) {
+        obPickerSearch.picked = {};
+        obPickerSearch.order = [];
+        known = false;
+      }
       if (!known) obPickerSearch.order.push(id);
       obPickerSearch.picked[id] = rowObject(tr);
       return;
@@ -3885,6 +3891,9 @@ function openItemPicker(payload, elementName, eventContext, request) {
     if (serverSearch) {
       // Выбор собран по всем запросам, а не только по последней выдаче.
       result = obPickerSearch.order.map(function (id) { return obPickerSearch.picked[id]; });
+      // Строка без id не может пережить смену выдачи, но текущий одиночный
+      // выбор всё равно должен попасть в ответ.
+      if (single && !result.length) result = checkedRows().map(function (cb) { return rowObject(cb.closest('tr')); });
     } else {
       result = checkedRows().map(function (cb) {
         return rowObject(cb.closest('tr'));
