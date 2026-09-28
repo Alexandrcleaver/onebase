@@ -3830,11 +3830,16 @@ function obRefreshDependentSelects(sourceEl) {
         obRefreshChoiceSelect(sel, true);
         return;
       }
-      var url = '/ui/_ref-options/' + encodeURIComponent(entity) + '?limit=50' + obRefFilterParam(sel);
+      var filter = obRefFilterParam(sel);
+      var seq = (sel._obOwnerRefreshSeq || 0) + 1;
+      sel._obOwnerRefreshSeq = seq;
+      var url = '/ui/_ref-options/' + encodeURIComponent(entity) + '?limit=50' + filter;
       fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
         .then(function (resp) { return resp.ok ? resp.json() : null; })
         .then(function (data) {
-          if (!data) return;
+          // An older response must not replace options for a newer owner,
+          // including when the user has switched A → B → A in the meantime.
+          if (!data || sel._obOwnerRefreshSeq !== seq || obRefFilterParam(sel) !== filter) return;
           var rows = data.items || [];
           var current = sel.value;
           var keep = false;

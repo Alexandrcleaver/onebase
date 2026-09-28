@@ -20,19 +20,19 @@ function response(data) {
   return {ok: true, status: 200, json: async () => data};
 }
 
-function runtime(fetchImpl, selected, withOwner) {
+function runtime(fetchImpl, selected, withOwner, withChoice = true) {
   const listeners = {};
   const sourceControl = {value: 'warehouse-a'};
-  const ownerControl = {value: 'contractor-a'};
+  const ownerControl = {name: 'Контрагент', value: 'contractor-a'};
   const attrs = {
-    'data-ref-choice-context': JSON.stringify({
-      form_entity: 'Инвентаризация',
-      form: 'ФормаОбъекта',
-      element: 'inventory-storage-choice',
-      sources: {'Объект.Склад': 'Склад'},
-    }),
     'data-ref-entity': 'МестоХранения',
   };
+  if (withChoice) attrs['data-ref-choice-context'] = JSON.stringify({
+    form_entity: 'Инвентаризация',
+    form: 'ФормаОбъекта',
+    element: 'inventory-storage-choice',
+    sources: {'Объект.Склад': 'Склад'},
+  });
   if (withOwner) attrs['data-ref-filter'] = JSON.stringify({Владелец: {from: 'Контрагент', value: ownerControl.value}});
   const select = {
     options: [
@@ -62,7 +62,9 @@ function runtime(fetchImpl, selected, withOwner) {
   const document = {
     documentElement: {contains() { return true; }},
     querySelectorAll(selector) {
-      return selector === 'select[data-ref-choice-context]' ? [select] : [];
+      if (selector === 'select[data-ref-choice-context]') return withChoice ? [select] : [];
+      if (selector === 'select[data-ref-filter]') return withOwner ? [select] : [];
+      return [];
     },
     getElementsByName(name) { return name === 'Склад' ? [sourceControl] : name === 'Контрагент' ? [ownerControl] : []; },
     querySelector(selector) { return selector.includes('Контрагент') ? ownerControl : null; },
@@ -92,6 +94,55 @@ function runtime(fetchImpl, selected, withOwner) {
   ready();
   return {api: sandbox, attrs, select, sourceControl, ownerControl};
 }
+
+test('owner-only refresh ignores a late A response after B has been selected', async () => {
+  const a = deferred();
+  const b = deferred();
+  const calls = [];
+  const env = runtime((url) => {
+    calls.push(url);
+    return [a, b][calls.length - 1].promise;
+  }, '', true, false);
+
+  env.api.obRefreshDependentSelects(env.ownerControl);
+  env.ownerControl.value = 'contractor-b';
+  env.api.obRefreshDependentSelects(env.ownerControl);
+  b.resolve(response({items: [{id: 'b-location', _label: 'B'}]}));
+  await new Promise(setImmediate);
+  assert.deepEqual(env.select.options.map((option) => option.value), ['', 'b-location']);
+
+  a.resolve(response({items: [{id: 'a-location', _label: 'A'}]}));
+  await new Promise(setImmediate);
+  assert.equal(calls.length, 2);
+  assert.match(calls[0], /contractor-a/);
+  assert.match(calls[1], /contractor-b/);
+  assert.deepEqual(env.select.options.map((option) => option.value), ['', 'b-location']);
+});
+
+test('owner-only refresh ignores the first A response after A→B→A', async () => {
+  const a1 = deferred();
+  const b = deferred();
+  const a2 = deferred();
+  const calls = [];
+  const env = runtime((url) => {
+    calls.push(url);
+    return [a1, b, a2][calls.length - 1].promise;
+  }, '', true, false);
+
+  env.api.obRefreshDependentSelects(env.ownerControl);
+  env.ownerControl.value = 'contractor-b';
+  env.api.obRefreshDependentSelects(env.ownerControl);
+  env.ownerControl.value = 'contractor-a';
+  env.api.obRefreshDependentSelects(env.ownerControl);
+  a2.resolve(response({items: [{id: 'new-a', _label: 'New A'}]}));
+  await new Promise(setImmediate);
+  a1.resolve(response({items: [{id: 'old-a', _label: 'Old A'}]}));
+  await new Promise(setImmediate);
+  b.resolve(response({items: [{id: 'b-location', _label: 'B'}]}));
+  await new Promise(setImmediate);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(env.select.options.map((option) => option.value), ['', 'new-a']);
+});
 
 test('owner and choice refresh stay together through A→B→A responses', async () => {
   const a1 = deferred();
