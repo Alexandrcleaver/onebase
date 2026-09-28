@@ -197,7 +197,7 @@ func TestDashboardRefreshControls_DataWidgetsOnly(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/ui/?subsystem=Продажи", nil)
 	for _, typ := range []metadata.WidgetType{metadata.WidgetTypeKPI, metadata.WidgetTypeList, metadata.WidgetTypeChart, metadata.WidgetTypeRecent} {
 		res := widget.Result{Name: "Продажи за день", Type: string(typ), Title: "Продажи"}
-		s.decorateRefreshResult(request, &res)
+		s.decorateRefreshResult(request, nil, &res, nil)
 		if res.PartialURL != "/ui/_widget/"+url.PathEscape(res.Name)+"?subsystem="+url.QueryEscape("Продажи") {
 			t.Fatalf("type=%s PartialURL=%q", typ, res.PartialURL)
 		}
@@ -210,12 +210,51 @@ func TestDashboardRefreshControls_DataWidgetsOnly(t *testing.T) {
 		}
 	}
 	action := widget.Result{Name: "Действия", Type: string(metadata.WidgetTypeActions), Title: "Действия"}
-	s.decorateRefreshResult(request, &action)
+	s.decorateRefreshResult(request, nil, &action, nil)
 	var rendered bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&rendered, "widget-card", action); err != nil {
 		t.Fatalf("render actions: %v", err)
 	}
 	if strings.Contains(rendered.String(), "data-ob-widget-refresh") {
 		t.Fatalf("actions widget unexpectedly got refresh: %s", rendered.String())
+	}
+}
+
+func TestDashboardRefreshOnSubscription(t *testing.T) {
+	s, _, _, _ := newWidgetPartialFixture(t)
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	res := widget.Result{Name: "Задачи", Type: string(metadata.WidgetTypeList), Title: "Задачи"}
+	s.decorateRefreshResult(request, &metadata.Widget{
+		Name: "Задачи", Type: metadata.WidgetTypeList,
+		RefreshOn: []string{"данные.а_задача", "задача.изменён"},
+	}, &res, nil)
+	if res.RefreshOn != "данные.а_задача задача.изменён" {
+		t.Fatalf("RefreshOn = %q", res.RefreshOn)
+	}
+	var rendered bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&rendered, "widget-card", res); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	out := rendered.String()
+	for _, want := range []string{
+		`data-ob-refresh-on="данные.а_задача задача.изменён"`,
+		`data-ob-live="widget/Задачи"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("card markup misses %q: %s", want, out)
+		}
+	}
+
+	// Без refresh_on атрибутов подписки быть не должно — карточка остаётся
+	// только с ручной кнопкой.
+	plain := widget.Result{Name: "Выручка", Type: string(metadata.WidgetTypeKPI), Title: "Выручка"}
+	s.decorateRefreshResult(request, &metadata.Widget{Name: "Выручка", Type: metadata.WidgetTypeKPI}, &plain, nil)
+	var plainBuf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&plainBuf, "widget-card", plain); err != nil {
+		t.Fatalf("render plain: %v", err)
+	}
+	if strings.Contains(plainBuf.String(), "data-ob-refresh-on") || strings.Contains(plainBuf.String(), "data-ob-live") {
+		t.Fatalf("plain card unexpectedly subscribed: %s", plainBuf.String())
 	}
 }
