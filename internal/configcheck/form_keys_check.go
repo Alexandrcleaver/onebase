@@ -65,7 +65,7 @@ func CheckFormKeyPlacement(proj *project.Project) []Issue {
 			if el == nil {
 				return
 			}
-			if el.ScrollX && !(el.Kind == metadata.FormElementGroupBox && strings.EqualFold(el.Orientation, "horizontal")) {
+			if el.ScrollX && (el.Kind != metadata.FormElementGroupBox || !strings.EqualFold(el.Orientation, "horizontal")) {
 				warns = append(warns, formKeyIssue(owner, form, el, "form.scroll-x",
 					"ключ scroll_x игнорируется — прокрутка вместо переноса есть только у ГруппаФормы с orientation: horizontal",
 					"Задайте orientation: horizontal у группы или уберите ключ."))
