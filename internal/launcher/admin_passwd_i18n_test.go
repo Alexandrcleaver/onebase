@@ -160,8 +160,17 @@ func TestPasswordPolicyMessagesLocalizedOnCreate(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "The password cannot be empty") {
 		t.Errorf("create en: %s", rec.Body.String())
 	}
-	// Отвергнутый пользователь действительно не создан (db ещё открыта).
-	if _, err := repo.GetByLogin(ctx, "учитель"); err == nil {
+	// Проверь отсутствие пользователя через рабочее соединение после обработчика.
+	checkDB, err := storage.ConnectSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkDB.Close()
+	user, err := auth.NewRepo(checkDB).GetByLogin(ctx, "учитель")
+	if err != nil {
+		t.Fatalf("проверка созданного пользователя: %v", err)
+	}
+	if user != nil {
 		t.Fatal("пользователь с отвергнутым паролем создан")
 	}
 }
