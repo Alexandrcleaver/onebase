@@ -727,8 +727,9 @@ func (tr *translator) systemRefByJoinAlias(name string) *refDimInfo {
 
 // standaloneSelectItem — токены [from, to) составляют целый элемент списка
 // выборки: стоят на глубине его SELECT, перед ними начало списка (ВЫБРАТЬ,
-// РАЗЛИЧНЫЕ, ПЕРВЫЕ N) или запятая списка, после — запятая, КАК, ИЗ или конец
-// вложенного запроса.
+// РАЗЛИЧНЫЕ) или запятая списка, после — запятая, КАК, ИЗ или конец
+// вложенного запроса. «ПЕРВЫЕ N» сюда не доходит: extractFirstN вырезает его
+// из токенов до трансляции.
 func (tr *translator) standaloneSelectItem(from, to int) bool {
 	ctx, toks := tr.sourceCtx, tr.tokens
 	if from < 1 || to >= len(toks) || from >= len(ctx.tokenDepth) || to >= len(ctx.tokenDepth) {
@@ -742,13 +743,6 @@ func (tr *translator) standaloneSelectItem(from, to int) bool {
 	switch prev.kind {
 	case tComma:
 		if ctx.tokenDepth[from-1] != depth {
-			return false
-		}
-	case tNum, tParam:
-		if from < 2 {
-			return false
-		}
-		if w := upperFast(toks[from-2].val); w != "ПЕРВЫЕ" && w != "TOP" {
 			return false
 		}
 	case tIdent:
