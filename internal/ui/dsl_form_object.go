@@ -65,6 +65,11 @@ type formObjectThis struct {
 	// «Записать» (#1189). Ставит form-event для формы новой записи; nil — у
 	// существующей записи восстанавливать нечего, её поля дочитаны из базы.
 	prepareNew func(context.Context) error
+	// assigned — реквизиты (в нижнем регистре), которым обработчик присвоил
+	// значение, в том числе Неопределено. По значению явное очищение не
+	// отличить от реквизита, которого форма не прислала: оба nil, а умолчание
+	// вправе заполнить только второй.
+	assigned map[string]struct{}
 	// writeBlocked prevents a form write lifecycle handler from recursively
 	// saving the same object and then letting the outer Save persist it again.
 	writeBlocked bool
@@ -319,6 +324,10 @@ func (f *formObjectThis) Set(name string, v any) {
 	if f == nil || f.obj == nil {
 		return
 	}
+	if f.assigned == nil {
+		f.assigned = map[string]struct{}{}
+	}
+	f.assigned[strings.ToLower(name)] = struct{}{}
 	f.obj.Set(name, v)
 }
 

@@ -1125,9 +1125,10 @@ func (s *Server) handleManagedFormEventMode(w http.ResponseWriter, r *http.Reque
 		// Объект.Записать() из обработчика — ещё один путь записи нового объекта:
 		// без этого он писал неразмещённые реквизиты пустыми, хотя «Записать»
 		// заполняет их умолчанием и ПриСозданииНового (#1189). Значение,
-		// присвоенное самим обработчиком, умолчание не перетирает.
+		// присвоенное самим обработчиком, умолчание не перетирает — даже
+		// Неопределено: набор присвоенного читается в момент записи.
 		thisObj.prepareNew = func(liveCtx context.Context) error {
-			newRes, err := s.overlayNewObjectDefaults(liveCtx, r, entity, form, obj, true)
+			newRes, err := s.overlayNewObjectDefaults(liveCtx, r, entity, form, obj, true, thisObj.assigned)
 			if err != nil {
 				return err
 			}
