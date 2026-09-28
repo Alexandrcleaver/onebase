@@ -115,6 +115,8 @@ func TestUsersRefNavigationRejectsAuthColumns(t *testing.T) {
 		`ВЫБРАТЬ Автор.totp_secret ИЗ Документ.Заявка`,
 		`ВЫБРАТЬ Автор.is_admin ИЗ Документ.Заявка`,
 		`ВЫБРАТЬ Автор.full_name ИЗ Документ.Заявка`,
+		`ВЫБРАТЬ Автор.* ИЗ Документ.Заявка`,
+		`ВЫБРАТЬ З.Автор.* ИЗ Документ.Заявка КАК З`,
 		`ВЫБРАТЬ З.Автор.password_hash КАК Х ИЗ Документ.Заявка КАК З`,
 		`ВЫБРАТЬ Номер ИЗ Документ.Заявка ГДЕ Автор.password_hash ПОДОБНО "$2%"`,
 		`ВЫБРАТЬ Номер ИЗ Документ.Заявка УПОРЯДОЧИТЬ ПО Автор.auth_subject`,
@@ -135,6 +137,40 @@ func TestUsersRefNavigationRejectsAuthColumns(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestUsersRefJoinAliasDoesNotHideOwnField(t *testing.T) {
+	dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+		ctx := context.Background()
+		if err := auth.NewRepo(db).EnsureSchema(ctx); err != nil {
+			t.Fatal(err)
+		}
+		entity := usersRefEntity()
+		entity.Fields = append(entity.Fields, metadata.Field{Name: "Ref_Автор", Type: metadata.FieldTypeString})
+		if err := metadata.Validate([]*metadata.Entity{entity}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Migrate(ctx, []*metadata.Entity{entity}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Upsert(ctx, entity.Name, uuid.New(), map[string]any{"Номер": "1", "Ref_Автор": "прикладное поле"}, entity); err != nil {
+			t.Fatal(err)
+		}
+		compiled, err := query.Compile(`ВЫБРАТЬ Автор.Ссылка, Ref_Автор КАК Значение ИЗ Документ.Заявка`, query.CompileOpts{Dialect: db.Dialect(), Entities: []*metadata.Entity{entity}})
+		if err != nil {
+			t.Fatalf("компиляция: %v", err)
+		}
+		rows, _, err := query.Run(ctx, db, &compiled)
+		if err != nil {
+			t.Fatalf("выполнение: %v\nSQL: %s", err, compiled.SQL)
+		}
+		if len(rows) != 1 || fmt.Sprint(rows[0]["значение"]) != "прикладное поле" {
+			t.Fatalf("своё поле Ref_Автор потеряно: %v", rows)
+		}
+		if _, err := query.Compile(`ВЫБРАТЬ Ref_Автор.password_hash ИЗ Документ.Заявка ГДЕ Автор.Логин <> ""`, query.CompileOpts{Dialect: db.Dialect(), Entities: []*metadata.Entity{entity}}); err == nil || !strings.Contains(err.Error(), "недоступно") {
+			t.Fatalf("служебный alias не должен открываться при одноимённом поле: %v", err)
+		}
+	})
 }
 
 // Имя реквизита достаётся колонке, только когда реквизит — целый элемент

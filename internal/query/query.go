@@ -4500,6 +4500,15 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 
 		// Number / star / operator
 		if t.kind == tNum || t.kind == tStar || t.kind == tOp {
+			// Автор.* разворачивается в ref_автор.* и раскрывает всю строку
+			// _users, минуя проверку имён реквизитов в ветке tIdent ниже.
+			if t.kind == tStar && tr.prevWasDot {
+				if rd := tr.systemRefQualifierAt(tr.pos - 2); rd != nil {
+					return Result{}, i18nerr.Errorf(
+						"у ссылки на учётную запись в запросе доступны только Ссылка, Наименование, Логин и ПолноеИмя: «%s.%s» недоступно",
+						tr.tokens[tr.pos-2].val, "*")
+				}
+			}
 			tr.prevWasDot = false
 			tr.advance()
 			tr.emit(t.val)
@@ -4549,7 +4558,8 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 			// транслятора, а не часть языка. Через него читалась бы вся строка
 			// _users мимо проверки объявленных реквизитов ниже, поэтому в
 			// тексте запроса он недоступен в любой позиции, кроме объявления.
-			if !prevDot && !prevAlias {
+			_, ownField := tr.colTypes[lower]
+			if !prevDot && !prevAlias && (!ownField || nextIsDot) {
 				if rd := tr.systemRefByJoinAlias(lower); rd != nil {
 					// Ключ — одним литералом: i18ncheck собирает ключи из исходника.
 					return Result{}, i18nerr.Errorf(
@@ -4564,7 +4574,6 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 			// (КАК Истина), в ссылке на уже объявленный алиас вывода
 			// (... КАК Истина ... УПОРЯДОЧИТЬ ПО Истина) и при одноимённом поле
 			// источника.
-			_, ownField := tr.colTypes[lower]
 			_, isAlias := tr.aliases[lower]
 			if !prevDot && !prevAlias && !nextIsDot && !ownField && !isAlias {
 				if lit, ok := boolLiteralSQL(lower, dialectName(tr.opts.Dialect)); ok {
