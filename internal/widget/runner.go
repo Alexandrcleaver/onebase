@@ -35,6 +35,15 @@ type Result struct {
 	PartialURL   string
 	RefreshLabel string
 	RefreshError string
+	// RefreshOn — имена событий для клиентской подписки карточки (план 182B),
+	// пробелом разделённые для атрибута data-ob-refresh-on. Заполняется вместе
+	// с остальными презентационными полями после Run.
+	RefreshOn string
+	// Filters — презентационные модели контролов интерактивных фильтров
+	// (план 182D), заполняются HTTP-слоем после Run вместе с PartialURL.
+	Filters []FilterControl
+	// ResetLabel — подпись кнопки сброса фильтров карточки (i18n HTTP-слоя).
+	ResetLabel string
 	// AccessDenied — у пользователя нет прав на источник данных виджета (или на
 	// все его кнопки-действия). Дашборд такие карточки не рендерит вовсе, в
 	// отличие от настоящих ошибок (compile/SQL), которые остаются видимыми.
@@ -56,6 +65,24 @@ type Result struct {
 	// Link — внутренний адрес, на который ведёт клик по карточке (см.
 	// metadata.Widget.Link). Пусто — карточка не кликабельна, как раньше.
 	Link string
+}
+
+// FilterControl — презентационная модель одного контрола фильтра карточки
+// (план 182D). Key — именаосванный ключ URL (w.<виджет>.<фильтр>); Current —
+// каноничное сырое значение из текущего URL, пустое = отбор не задан.
+type FilterControl struct {
+	Key     string
+	Name    string
+	Label   string
+	Kind    string // string | number | date | bool | select | reference
+	Current string
+	Options []FilterOption
+}
+
+// FilterOption — вариант select-контрола (bool/select/reference).
+type FilterOption struct {
+	Value string
+	Label string
 }
 
 // KPIResult holds the single numeric value rendered by a KPI widget.
@@ -236,7 +263,7 @@ func (r *Runner) runOnce(ctx context.Context, w *metadata.Widget, params map[str
 }
 
 func (r *Runner) runKPI(ctx context.Context, w *metadata.Widget, params map[string]any, res *Result) {
-	rows, _, err := r.runQuery(ctx, w, params)
+	rows, _, _, err := r.runQuery(ctx, w, params)
 	if err != nil {
 		setResultError(res, err)
 		return
@@ -250,7 +277,7 @@ func (r *Runner) runKPI(ctx context.Context, w *metadata.Widget, params map[stri
 }
 
 func (r *Runner) runList(ctx context.Context, w *metadata.Widget, params map[string]any, res *Result) {
-	rows, cols, err := r.runQuery(ctx, w, params)
+	rows, cols, compiled, err := r.runQuery(ctx, w, params)
 	if err != nil {
 		setResultError(res, err)
 		return
@@ -258,13 +285,39 @@ func (r *Runner) runList(ctx context.Context, w *metadata.Widget, params map[str
 	if w.Limit > 0 && len(rows) > w.Limit {
 		rows = rows[:w.Limit]
 	}
+	// Навигация строк (план 182C): сырой идентификатор забирается ДО
+	// resolveUUIDs, колонка обязана быть подтверждённой компилятором ссылкой
+	// именно на объявленную сущность. Любая неоднозначность — строки просто
+	// остаются некликабельными, виджет продолжает работать.
+	idCol, rawIDs := r.navigationIDs(w, cols, rows, compiled)
 	r.resolveUUIDs(ctx, rows)
+	if len(rawIDs) > 0 {
+		entity := r.Reg.GetEntity(w.Source.Entity)
+		for i, row := range rows {
+			id, perr := uuid.Parse(rawIDs[i])
+			if perr != nil || id == uuid.Nil || entity == nil {
+				continue // пустой/битый id оставляет конкретную строку некликабельной
+			}
+			row["_row_url"] = "/ui/" + string(entity.Kind) + "/" + entity.Name + "/" + rawIDs[i]
+		}
+	}
+	displayCols := cols
+	if idCol != "" && len(w.Columns) == 0 {
+		// Сырой идентификатор — навигационная деталь, а не данные для таблицы:
+		// из авто-колонок (автор не объявил свои) он исключается.
+		displayCols = make([]string, 0, len(cols))
+		for _, c := range cols {
+			if c != idCol {
+				displayCols = append(displayCols, c)
+			}
+		}
+	}
 	res.Rows = rows
-	res.Columns = columnsForList(w, cols)
+	res.Columns = columnsForList(w, displayCols)
 }
 
 func (r *Runner) runChart(ctx context.Context, w *metadata.Widget, params map[string]any, res *Result) {
-	rows, cols, err := r.runQuery(ctx, w, params)
+	rows, cols, _, err := r.runQuery(ctx, w, params)
 	if err != nil {
 		setResultError(res, err)
 		return
@@ -509,11 +562,41 @@ func (r *Runner) resolveUUIDs(ctx context.Context, rows []map[string]any) {
 	}
 }
 
+// navigationIDs возвращает имя колонки-идентификатора и сырые (до
+// resolveUUIDs) значения этой колонки по строкам. Подтверждение семантики —
+// через RefColumns компилятора (query.ResolveRefOutputColumn): колонка обязана
+// ссылаться именно на Source.Entity. Без source или без подтверждения —
+// пустая выдача, навигации нет.
+func (r *Runner) navigationIDs(w *metadata.Widget, cols []string, rows []map[string]any, compiled *query.Result) (string, []string) {
+	if w.Source == nil {
+		return "", nil
+	}
+	idCol := query.ResolveRefOutputColumn(compiled, w.Source.IDField, w.Source.Entity, cols)
+	if idCol == "" {
+		return "", nil
+	}
+	ids := make([]string, len(rows))
+	for i, row := range rows {
+		switch v := row[idCol].(type) {
+		case string:
+			ids[i] = v
+		case fmt.Stringer:
+			ids[i] = v.String()
+		case nil:
+		default:
+			if v != nil {
+				ids[i] = fmt.Sprintf("%v", v)
+			}
+		}
+	}
+	return idCol, ids
+}
+
 // runQuery is the shared back-end for kpi/list/chart widgets.
-func (r *Runner) runQuery(ctx context.Context, w *metadata.Widget, params map[string]any) ([]map[string]any, []string, error) {
+func (r *Runner) runQuery(ctx context.Context, w *metadata.Widget, params map[string]any) ([]map[string]any, []string, *query.Result, error) {
 	rowFilters, err := access.QueryRowFiltersWithLookup(r.User, r.Reg.Entities(), r.Reg.Registers(), r.Reg.InfoRegisters(), r.Reg.AccountRegisters(), r.Reg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	compiled, err := query.Compile(w.Query, query.CompileOpts{
 		Params:      params,
@@ -525,25 +608,25 @@ func (r *Runner) runQuery(ctx context.Context, w *metadata.Widget, params map[st
 		Dialect:     r.Store.Dialect(),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("compile: %w", err)
+		return nil, nil, nil, fmt.Errorf("compile: %w", err)
 	}
 	if denied := r.deniedQuerySource(compiled.Sources); denied != "" {
-		return nil, nil, &accessDeniedError{object: denied}
+		return nil, nil, nil, &accessDeniedError{object: denied}
 	}
 	// План 88E: защищённое поле в простой колонке виджета маскируется, в отборе
 	// или агрегате — по-прежнему закрывает виджет целиком.
 	maskPlan := access.QueryMaskPlanFor(r.User, compiled, r.sourceMeta)
 	if maskPlan.Denied != "" {
-		return nil, nil, &accessDeniedError{object: "поле «" + maskPlan.Denied + "»"}
+		return nil, nil, nil, &accessDeniedError{object: "поле «" + maskPlan.Denied + "»"}
 	}
 	rows, cols, err := query.Run(ctx, r.Store, &compiled)
 	if err != nil {
-		return rows, cols, err
+		return rows, cols, &compiled, err
 	}
 	if err := maskPlan.Apply(rows); err != nil {
-		return nil, nil, &accessDeniedError{object: err.Error()}
+		return nil, nil, nil, &accessDeniedError{object: err.Error()}
 	}
-	return rows, cols, nil
+	return rows, cols, &compiled, nil
 }
 
 func (r *Runner) sourceMeta(kind, name string) *metadata.Entity {
