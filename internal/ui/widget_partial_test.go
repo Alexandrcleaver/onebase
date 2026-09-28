@@ -197,7 +197,7 @@ func TestDashboardRefreshControls_DataWidgetsOnly(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/ui/?subsystem=Продажи", nil)
 	for _, typ := range []metadata.WidgetType{metadata.WidgetTypeKPI, metadata.WidgetTypeList, metadata.WidgetTypeChart, metadata.WidgetTypeRecent} {
 		res := widget.Result{Name: "Продажи за день", Type: string(typ), Title: "Продажи"}
-		s.decorateRefreshResult(request, nil, &res)
+		s.decorateRefreshResult(request, nil, &res, nil)
 		if res.PartialURL != "/ui/_widget/"+url.PathEscape(res.Name)+"?subsystem="+url.QueryEscape("Продажи") {
 			t.Fatalf("type=%s PartialURL=%q", typ, res.PartialURL)
 		}
@@ -210,7 +210,7 @@ func TestDashboardRefreshControls_DataWidgetsOnly(t *testing.T) {
 		}
 	}
 	action := widget.Result{Name: "Действия", Type: string(metadata.WidgetTypeActions), Title: "Действия"}
-	s.decorateRefreshResult(request, nil, &action)
+	s.decorateRefreshResult(request, nil, &action, nil)
 	var rendered bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&rendered, "widget-card", action); err != nil {
 		t.Fatalf("render actions: %v", err)
@@ -228,7 +228,7 @@ func TestDashboardRefreshOnSubscription(t *testing.T) {
 	s.decorateRefreshResult(request, &metadata.Widget{
 		Name: "Задачи", Type: metadata.WidgetTypeList,
 		RefreshOn: []string{"данные.а_задача", "задача.изменён"},
-	}, &res)
+	}, &res, nil)
 	if res.RefreshOn != "данные.а_задача задача.изменён" {
 		t.Fatalf("RefreshOn = %q", res.RefreshOn)
 	}
@@ -249,7 +249,7 @@ func TestDashboardRefreshOnSubscription(t *testing.T) {
 	// Без refresh_on атрибутов подписки быть не должно — карточка остаётся
 	// только с ручной кнопкой.
 	plain := widget.Result{Name: "Выручка", Type: string(metadata.WidgetTypeKPI), Title: "Выручка"}
-	s.decorateRefreshResult(request, &metadata.Widget{Name: "Выручка", Type: metadata.WidgetTypeKPI}, &plain)
+	s.decorateRefreshResult(request, &metadata.Widget{Name: "Выручка", Type: metadata.WidgetTypeKPI}, &plain, nil)
 	var plainBuf bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&plainBuf, "widget-card", plain); err != nil {
 		t.Fatalf("render plain: %v", err)

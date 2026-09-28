@@ -198,9 +198,12 @@ func (s *Server) homeDashboardData(r *http.Request) map[string]any {
 				Error: s.tr(lang, "виджет не найден:") + " " + wMeta.Name,
 			}
 		}
-		res := runner.Run(r.Context(), wMeta)
+		// Фильтры полной страницы (план 182D): URL-значения применяются к данным
+		// толерантно — мусор трактуется как пустой отбор, страница не ломается.
+		// Иначе после F5 контролы заполнены, а строки неотфильтрованы.
+		res := runner.RunWithOptions(r.Context(), wMeta, widget.RunOptions{Params: lenientWidgetFilterParams(r, wMeta)})
 		res.Title = wMeta.DisplayTitle(lang)
-		s.decorateRefreshResult(r, wMeta, &res)
+		s.decorateRefreshResult(r, wMeta, &res, runner)
 		return res
 	}
 	for _, group := range groups {
@@ -256,23 +259,33 @@ func refreshableWidgetType(t metadata.WidgetType) bool {
 	}
 }
 
-func (s *Server) decorateRefreshResult(r *http.Request, wMeta *metadata.Widget, res *widget.Result) {
+func (s *Server) decorateRefreshResult(r *http.Request, wMeta *metadata.Widget, res *widget.Result, runner *widget.Runner) {
 	if res == nil || !refreshableWidgetType(metadata.WidgetType(res.Type)) {
 		return
 	}
-	q := make(url.Values)
-	if sub := r.URL.Query().Get("subsystem"); sub != "" {
-		q.Set("subsystem", sub)
+	subsystem := r.URL.Query().Get("subsystem")
+	rawValues := map[string]string{}
+	if wMeta != nil {
+		rawValues = widgetFilterRawValues(r, wMeta)
 	}
-	res.PartialURL = "/ui/_widget/" + url.PathEscape(res.Name)
-	if encoded := q.Encode(); encoded != "" {
-		res.PartialURL += "?" + encoded
+	if wMeta == nil {
+		res.PartialURL = widgetPartialURL(res.Name, nil, subsystem, nil)
+	} else {
+		res.PartialURL = widgetPartialURL(res.Name, wMeta, subsystem, rawValues)
 	}
 	lang := s.resolveLang(r)
 	res.RefreshLabel = s.tr(lang, "Обновить")
 	res.RefreshError = s.tr(lang, "Не удалось обновить виджет")
+	res.ResetLabel = s.tr(lang, "Сбросить")
 	if wMeta != nil && len(wMeta.RefreshOn) > 0 {
 		res.RefreshOn = strings.Join(wMeta.RefreshOn, " ")
+	}
+	if wMeta != nil && runner != nil {
+		if controls, err := s.filterControls(r.Context(), lang, wMeta, rawValues, runner); err == nil {
+			res.Filters = controls
+		}
+		// Ошибка сборки контролов (недоступные опции) не ломает страницу:
+		// карточка остаётся без фильтров, данные рендерятся как раньше.
 	}
 }
 
@@ -301,22 +314,31 @@ type widgetPartialResponse struct {
 
 // widgetPartial re-renders one card body through the same Runner and named
 // templates as the full dashboard. The route accepts only server-resolved
-// widget/layout identity; later filter slices may add their own validated
-// namespaced values, but arbitrary query parameters are rejected here.
+// widget/layout identity plus this widget's declared namespaced filter values
+// (план 182D); any other query parameter is rejected with 400.
 func (s *Server) widgetPartial(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
+	wMeta := s.dashboardWidget(r, chi.URLParam(r, "name"))
+	if wMeta == nil || !refreshableWidgetType(wMeta.Type) {
+		http.NotFound(w, r)
+		return
+	}
+	allowed := map[string]bool{"subsystem": true}
+	for key := range widgetFilterKeys(wMeta) {
+		allowed[key] = true
+	}
 	for key := range r.URL.Query() {
-		if key != "subsystem" {
+		if !allowed[key] {
 			http.Error(w, "unsupported widget parameter", http.StatusBadRequest)
 			return
 		}
 	}
-	if !s.requireSubsystemVisible(w, r) {
+	filterParams, err := parseWidgetFilterParams(r, wMeta)
+	if err != nil {
+		http.Error(w, "unsupported widget parameter", http.StatusBadRequest)
 		return
 	}
-	wMeta := s.dashboardWidget(r, chi.URLParam(r, "name"))
-	if wMeta == nil || !refreshableWidgetType(wMeta.Type) {
-		http.NotFound(w, r)
+	if !s.requireSubsystemVisible(w, r) {
 		return
 	}
 
@@ -327,7 +349,20 @@ func (s *Server) widgetPartial(w http.ResponseWriter, r *http.Request) {
 	}
 	runner.User = user
 	runner.Cache = s.widgetCache
-	res := runner.RunWithOptions(r.Context(), wMeta, widget.RunOptions{Fresh: true})
+	// reference-значение фильтра проверяется на чтение и RLS до исполнения:
+	// недоступное и несуществующее значения дают одинаковый отказ.
+	for _, f := range wMeta.Filters {
+		if f.ReferenceEntity() == "" {
+			continue
+		}
+		if v, ok := filterParams[f.Param]; ok {
+			if id, ok := v.(string); ok && id != "" && !runner.ReferenceAllowed(r.Context(), f.ReferenceEntity(), id) {
+				http.Error(w, "unsupported widget parameter", http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	res := runner.RunWithOptions(r.Context(), wMeta, widget.RunOptions{Params: filterParams, Fresh: true})
 	res.Title = wMeta.DisplayTitle(s.resolveLang(r))
 	if res.AccessDenied {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
