@@ -315,6 +315,19 @@ func templateFuncs(bundle *i18n.Bundle) template.FuncMap {
 			return infoRegisterDetailPanelJSONTranslated(ir, row, lang, periodTitle,
 				func(key string) string { return translate(lang, key) })
 		},
+		// choiceContextJSON — карта «имя параметра → путь к контролу» для
+		// data-ref-context. Значения намеренно не подставляются при серверном
+		// рендере: браузер читает текущие контролы перед каждым запросом подбора.
+		"choiceContextJSON": func(el *metadata.FormElement) string {
+			if el == nil || len(el.ChoiceContext) == 0 {
+				return ""
+			}
+			raw, err := json.Marshal(el.ChoiceContext)
+			if err != nil {
+				return ""
+			}
+			return string(raw)
+		},
 		"isRichText": func(t any) bool { return fmt.Sprintf("%v", t) == string(metadata.FieldTypeRichText) },
 		"isImage":    func(t any) bool { return fmt.Sprintf("%v", t) == string(metadata.FieldTypeImage) },
 		"fieldNamesCSV": func(fields []metadata.Field) string {
@@ -2570,6 +2583,10 @@ const tplReport = `
       <label>{{$p.Label}}</label>
       {{if $p.IsDate}}
         <input type="date" name="{{$pname}}" value="{{$pval}}">
+      {{else if $p.IsDateTime}}
+        {{/* step="1" обязателен: шаг поля по умолчанию — 60 секунд, а {{now}}
+             отдаёт секунды, и почти всякое умолчание получило бы stepMismatch. */}}
+        <input type="datetime-local" step="1" name="{{$pname}}" value="{{$pval}}">
       {{else if $p.IsNum}}
         <input type="number" name="{{$pname}}" value="{{$pval}}">
       {{else if $p.IsSel}}
