@@ -2495,6 +2495,15 @@ func (s *Server) handleProcessorFormEventMode(w http.ResponseWriter, r *http.Req
 		vars["ДобавитьЗначениеСписка"] = choiceFn
 		vars["AddChoiceItem"] = choiceFn
 
+		// Навигация (#1557): ОткрытьФорму(Ссылка) из формы обработки — самое
+		// частое место для «нашли документ — открыли его». Словарь билтинов у
+		// check общий, поэтому без регистрации здесь вызов проходил проверку и
+		// падал в рантайме unknown function — тот же класс, что #1683.
+		var navigation *navigationPayload
+		navFn := newNavigationBuiltin(&navigation, s.reg, s.store, auth.UserFromContext(r.Context()))
+		vars["ОткрытьФорму"] = navFn
+		vars["OpenForm"] = navFn
+
 		condRuntime := newFormConditionalRuntime(form)
 		for k, v := range condRuntime.builtins() {
 			vars[k] = v
@@ -2552,6 +2561,9 @@ func (s *Server) handleProcessorFormEventMode(w http.ResponseWriter, r *http.Req
 		if question.Variants != nil {
 			q := question
 			resp.Question = &q
+		}
+		if navigation != nil {
+			resp.Navigation = navigation
 		}
 		resp.ChoiceList = choiceItems
 		resp.Dirty = boolPtr(transientManagedStateDirty(obj, fieldsBefore, tablesBefore))
