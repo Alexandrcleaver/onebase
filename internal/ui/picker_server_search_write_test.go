@@ -9,6 +9,7 @@ import (
 	"github.com/ivantit66/onebase/internal/metadata"
 	"github.com/ivantit66/onebase/internal/processor"
 	"github.com/ivantit66/onebase/internal/runtime"
+	"github.com/ivantit66/onebase/internal/scheduler"
 )
 
 // Поиск уходит отдельным запросом вне очереди записывающих form-event.
@@ -39,6 +40,42 @@ func TestPicker_ServerSearchCannotWriteThroughPublicFormEvent(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("поиск записал %d строк", count)
+	}
+}
+
+func TestPicker_ServerSearchCannotStartScheduledJob(t *testing.T) {
+	f := setupFormCtxServer(t, `
+Процедура Тест()
+	РегламентныеЗадания.Запустить("Proof");
+КонецПроцедуры
+`, nil)
+	f.entity.Forms[0].Elements[0].Handlers[metadata.FormEventOnSearch] = "Тест"
+	if err := f.srv.store.EnsureScheduledRunsTable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sched := scheduler.New(f.srv.store, f.srv.reg, f.srv.interp)
+	if err := sched.RegisterGoJob("Proof", "Proof", "@every 100h", func(context.Context) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.srv.sched = sched
+	t.Cleanup(func() { _ = sched.Shutdown(context.Background()) })
+
+	body := url.Values{}
+	body.Set("_id", f.docID.String())
+	body.Set("_element", "КнопкаТест")
+	body.Set("_event", string(metadata.FormEventOnSearch))
+	resp := decodeFormEventResponse(t, executeFormEvent(t, f.srv, f.entity, body).Body.Bytes())
+	if resp.OK || !strings.Contains(resp.Error, "запись недоступна в обработчике Поиск") {
+		t.Fatalf("поиск запустил задание: ok=%v error=%q", resp.OK, resp.Error)
+	}
+	runs, err := f.srv.store.ScheduledRuns(context.Background(), "Proof", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("поиск создал прогоны задания: %+v", runs)
 	}
 }
 
