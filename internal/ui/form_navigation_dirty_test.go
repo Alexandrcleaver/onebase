@@ -83,8 +83,8 @@ func TestOpenForm_ProcessorFormReportsHandlerChangeWithNavigation(t *testing.T) 
 	}
 }
 
-// Клиент: настоящий dispatchFormEvent из managed.js в детерминированном
-// стенде. Решение о переходе принимается по состоянию формы ПОСЛЕ ответа.
+// Клиент: публичный obFire из managed.js в детерминированном стенде.
+// Ответ приходит после пользовательского ввода в ожидающую форму.
 func TestManagedNavigationRespectsResponseDirtyState(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -100,11 +100,24 @@ const fs = require('fs');
 const source = fs.readFileSync(process.argv[2], 'utf8');
 const start = source.indexOf('  async function dispatchFormEvent(snapshot){');
 const end = source.indexOf('\n  window.obFire = function', start);
-if (start < 0 || end < 0) throw new Error('dispatchFormEvent slice not found');
-const fnSource = source.slice(start, end);
+const fireEnd = source.indexOf('\n  // One close controller', end);
+const helpersStart = source.indexOf('  function closeBodyEntries(body, predicate){');
+const helpersEnd = source.indexOf('  function setManagedFormDirty(dirty){', helpersStart);
+const mergeStart = source.indexOf('  function applyCloseResponse(data, before, current){');
+const mergeEnd = source.indexOf('\n  window.obRequestFormClose', mergeStart);
+if ([start, end, fireEnd, helpersStart, helpersEnd, mergeStart, mergeEnd].some(i => i < 0)) {
+  throw new Error('managed.js behavior slices not found');
+}
+const fnSource = source.slice(helpersStart, helpersEnd) + source.slice(mergeStart, mergeEnd) +
+  source.slice(start, fireEnd);
 
-async function run(response, formDirty) {
-  const calls = { assign: [], flash: [], dirty: [], values: [] };
+async function run(response, formDirty, concurrentEdit) {
+  const calls = { assign: [], flash: [], dirty: [], values: [], savedIdentity: 0 };
+  const fields = { 'Имя': 'исходное', 'Описание': 'старое' };
+  const formEditState = { revision: 0 };
+  let fetchEntered, finishFetch;
+  const entered = new Promise(resolve => { fetchEntered = resolve; });
+  const waiting = new Promise(resolve => { finishFetch = resolve; });
   const win = {
     _obFormDirty: formDirty,
     location: { assign(url) { calls.assign.push(url); } },
@@ -116,18 +129,38 @@ async function run(response, formDirty) {
   const env = {
     window: win,
     reloadRequired: false, formEventWriteUnknown: false, manualReconcileRequired: false,
+    formEditState,
+    formEventQueue: Promise.resolve(), formEventPendingCount: 0, formEventPending: false,
+    closePending: null, closeHandoffPending: false, retryableClose: null,
     DOC_ID: 'doc', URL: '/ui/form-event',
-    fetch: async () => ({ ok: true, json: async () => response }),
+    fetch: () => { fetchEntered(); return waiting; },
     flash: (m, kind) => calls.flash.push([m, kind]),
     setManagedFormDirty: (v) => calls.dirty.push(v),
-    applySavedIdentity() {}, openItemPicker() {}, applyFormConditionalCSS() {},
+    applySavedIdentity() { calls.savedIdentity++; },
+    openItemPicker() {}, applyFormConditionalCSS() {},
     applyElementStates() {}, applyChoiceList() {}, applyFormTables() {},
-    applyValues: (v) => { if (v) calls.values.push(v); },
+    applyValues: (v) => { if (v) { calls.values.push(v); Object.assign(fields, v); } },
+    closeSnapshotBody: async () => new URLSearchParams(fields),
+    captureFormEventSelection() {},
+    snapshotFormEvent: async () => ({
+      body: new URLSearchParams(fields), form: null, elementName: 'Открыть',
+      extraParams: null, wasNew: false, editRevision: formEditState.revision,
+    }),
     refreshQueuedFormEventIdentity() {},
   };
-  const factory = new Function(...Object.keys(env), fnSource + '\nreturn dispatchFormEvent;');
-  const dispatch = factory(...Object.values(env));
-  await dispatch({ body: new URLSearchParams(), form: null, elementName: 'Открыть', extraParams: null, wasNew: false });
+  const factory = new Function(...Object.keys(env), fnSource + '\nreturn window.obFire;');
+  const fire = factory(...Object.values(env));
+  const pending = fire('Открыть', 'Нажатие');
+  await entered;
+  if (concurrentEdit) {
+    fields['Имя'] = 'ввод пользователя';
+    formEditState.revision++;
+    win._obFormDirty = true;
+  }
+  finishFetch({ ok: true, json: async () => response });
+  await pending;
+  calls.fields = fields;
+  calls.isDirty = win._obFormDirty;
   return calls;
 }
 
@@ -156,6 +189,22 @@ const blocked = 'Форма содержит несохранённые изме
   // Обработчик сам записал объект (dirty=false + version) — форма чиста.
   c = await run({ ok: true, dirty: false, version: 2, navigation: nav }, true);
   check(c.assign.length === 1, 'записанная обработчиком форма не перешла: ' + JSON.stringify(c));
+
+  // Ввод после отправки snapshot старше ответа. Старые values не затирают
+  // поле пользователя; независимое изменение обработчика всё ещё видно.
+  c = await run({ ok: true, dirty: true, navigation: nav,
+    values: { 'Имя': 'значение старого ответа', 'Описание': 'изменил обработчик' } }, false, true);
+  check(c.assign.length === 0, 'переход потерял ввод во время ожидания: ' + JSON.stringify(c));
+  check(c.fields['Имя'] === 'ввод пользователя', 'ответ затёр новый ввод: ' + JSON.stringify(c));
+  check(c.fields['Описание'] === 'изменил обработчик', 'независимое поле не применено: ' + JSON.stringify(c));
+  check(c.isDirty, 'после позднего ввода форма должна быть грязной: ' + JSON.stringify(c));
+
+  // Даже доказанная запись старого snapshot не разрешает переход после ввода.
+  c = await run({ ok: true, dirty: false, version: 2, navigation: nav,
+    values: { 'Имя': 'сохранённое старое значение' } }, false, true);
+  check(c.assign.length === 0, 'запись старого snapshot разрешила переход: ' + JSON.stringify(c));
+  check(c.fields['Имя'] === 'ввод пользователя' && c.isDirty, 'поздний ввод потерян: ' + JSON.stringify(c));
+  check(c.savedIdentity === 1, 'новая версия записи не принята: ' + JSON.stringify(c));
   console.log('ok');
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
 `

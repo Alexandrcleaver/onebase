@@ -978,7 +978,8 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
     }
     return {
 	  body: body, form: form, elementName: elementName,
-	  extraParams: extraParams, wasNew: !DOC_ID
+	  extraParams: extraParams, wasNew: !DOC_ID,
+	  editRevision: formEditState.revision
 	};
   }
 
@@ -1024,6 +1025,26 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
       // optimistic version before any renderer, picker or message callback can
       // throw, so a later queued action updates the row instead of inserting it.
       applySavedIdentity(data);
+      // The user can type after FormData was sent. An old response must not
+      // navigate away or repaint those newer edits, even when the handler
+      // saved the old snapshot and returned dirty=false.
+      if (data.navigation && data.navigation.url && formEditState.revision !== snapshot.editRevision) {
+        window.obSetManagedFormDirty(true);
+        var revisionBeforeRead = formEditState.revision;
+        var currentBody = null;
+        try { currentBody = await closeSnapshotBody('', ''); } catch (_) {}
+        if (currentBody && formEditState.revision === revisionBeforeRead) {
+          // Reuse the close controller's field/table merge: only unchanged
+          // controls may receive values from the older server snapshot.
+          applyCloseResponse(data, snapshot.body, currentBody);
+        } else {
+          (data.messages || []).forEach(m => flash(m, 'ok'));
+          if (data.error) flash(data.error, 'err');
+        }
+        window.obSetManagedFormDirty(true);
+        flash('Форма изменилась во время выполнения команды — переход не выполнен', 'err');
+        return;
+      }
       // Навигация (#1557): переход только у инициатора, адрес построен
       // сервером. Несохранённая форма остаётся на месте — переход отменяется.
       // Решает состояние формы ПОСЛЕ этого ответа, а не до него. dirty=true
@@ -1163,6 +1184,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
   var formEventPending = false;
   var formEventWriteUnknown = false;
 	var manualReconcileRequired = false;
+  var formEditState = {revision: 0};
   var closePending = null;
   // Embedded OK/post first crosses a postMessage boundary before the parent
   // asks this child for its close decision. Keep native submit fail-closed in
@@ -1859,6 +1881,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
   var _obBaseTitle = document.title;
   setManagedFormDirty(cfg.initialDirty === true);
   function _obMarkDirty(){
+	formEditState.revision++;
 	setManagedFormDirty(true);
   }
   document.addEventListener('input',  function(e){ if (e.target && e.target.closest && e.target.closest('#main-form')) _obMarkDirty(); }, true);
