@@ -1,0 +1,143 @@
+package configcheck
+
+import (
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// Обращение к несуществующему объекту через глобальный менеджер
+// (Документы.СписаниеСРасчётныйСчёт при документе «СписаниеСРасчётногоСчёта»)
+// вычисляется в Неопределено. Проверка конфигурации его не видела: ошибка
+// всплывала «Метод Создать вызван у Неопределено» только при выполнении строки,
+// а в редкой ветке — у пользователя. Так в торговой конфигурации загрузка
+// выписки создавала поступления, но ни одного списания со счёта.
+//
+// Проверка идёт через RunFullWithOptions — путь `onebase check --lint`.
+func TestLintUnknownMetadataObject(t *testing.T) {
+	dir := t.TempDir()
+	writeMetadataObjectsProject(t, dir)
+
+	plain := RunFull(dir)
+	for _, w := range plain.Warnings {
+		if w.Code == "dsl.unknown-metadata-object" {
+			t.Fatalf("без --lint предупреждения быть не должно: %+v", w)
+		}
+	}
+
+	res := RunFullWithOptions(dir, Options{Lint: true})
+	if !res.OK {
+		t.Fatalf("предупреждение не должно валить проверку: %+v", res.Issues)
+	}
+	var got []string
+	for _, w := range res.Warnings {
+		if w.Code == "dsl.unknown-metadata-object" {
+			got = append(got, w.Kind+"|"+w.Message+"|"+w.SuggestedFix)
+		}
+	}
+	sort.Strings(got)
+	want := []struct{ kind, name, suggest string }{
+		{"DSL обработка", "Документы.ПоступлениеНаРасчётныйСчт", "ПоступлениеНаРасчётныйСчёт"},
+		{"DSL обработка", "Documents.Расход", ""},
+		{"DSL объект", "Движения.Остатк", "Остатки"},
+		{"DSL форма обработки", "Справочники.Товр", "Товар"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ожидалось %d предупреждения, получено %d:\n%s", len(want), len(got), strings.Join(got, "\n"))
+	}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			parts := strings.SplitN(g, "|", 3)
+			if parts[0] != w.kind || !strings.HasPrefix(parts[1], w.name+":") {
+				continue
+			}
+			found = true
+			if w.suggest != "" && !strings.Contains(parts[2], w.suggest) {
+				t.Errorf("%s: подсказка не называет %q: %q", w.name, w.suggest, parts[2])
+			}
+		}
+		if !found {
+			t.Errorf("нет предупреждения %s (%s) среди:\n%s", w.name, w.kind, strings.Join(got, "\n"))
+		}
+	}
+}
+
+func writeMetadataObjectsProject(t *testing.T, dir string) {
+	t.Helper()
+	mkFile(t, filepath.Join(dir, "catalogs", "товар.yaml"), `name: Товар
+fields:
+  - {name: Наименование, type: string}
+`)
+	mkFile(t, filepath.Join(dir, "documents", "приход.yaml"), `name: Приход
+posting: true
+fields:
+  - {name: Дата, type: date}
+  - {name: Товар, type: "reference:Товар"}
+`)
+	mkFile(t, filepath.Join(dir, "documents", "поступление.yaml"), `name: ПоступлениеНаРасчётныйСчёт
+fields:
+  - {name: Дата, type: date}
+`)
+	mkFile(t, filepath.Join(dir, "registers", "остатки.yaml"), `name: Остатки
+dimensions:
+  - {name: Товар, type: "reference:Товар"}
+resources:
+  - {name: Количество, type: number}
+`)
+	mkFile(t, filepath.Join(dir, "inforegs", "цены.yaml"), `name: Цены
+periodic: true
+dimensions:
+  - {name: Товар, type: "reference:Товар"}
+resources:
+  - {name: Цена, type: number}
+`)
+	mkFile(t, filepath.Join(dir, "enums", "вид.yaml"), `name: Вид
+values: [Первый, Второй]
+`)
+	// Проведение: опечатка в имени регистра движений.
+	mkFile(t, filepath.Join(dir, "src", "приход.posting.os"), `Процедура ОбработкаПроведения()
+  Дв = Движения.Остатки.Добавить();
+  Дв.Товар = this.Товар;
+  Дв2 = Движения.Остатк.Добавить();
+КонецПроцедуры
+`)
+	mkFile(t, filepath.Join(dir, "processors", "загрузка.yaml"), `name: Загрузка
+params: []
+`)
+	// Известные имена молчат при любом регистре букв и через английский
+	// синоним менеджера; опечатка и отсутствующий объект — предупреждение.
+	mkFile(t, filepath.Join(dir, "src", "загрузка.proc.os"), `Процедура Выполнить() Экспорт
+  Д = Документы.ПоступлениеНаРасчётныйСчт.Создать();
+  П = документы.приход.Создать();
+  Т = Справочники.Товар.Создать();
+  Р = РегистрыНакопления.Остатки;
+  ИР = РегистрыСведений.Цены;
+  ВП = Перечисления.Вид.Первый;
+  ДА = Documents.Приход;
+  ДБ = Documents.Расход;
+КонецПроцедуры
+`)
+	// Имя менеджера, занятое переменной модуля, — уже не менеджер.
+	mkFile(t, filepath.Join(dir, "src", "обмен.module.os"), `Функция Сопоставление() Экспорт
+  Документы = Новый Соответствие;
+  Документы.Вставить("Реализация", 1);
+  Возврат Документы.Реализация;
+КонецФункции
+`)
+	// Форма обработки проверяется так же, как модуль обработки.
+	mkFile(t, filepath.Join(dir, "forms", "загрузка", "формаобъекта.form.yaml"), `schema: onebase.form/v1
+form:
+  name: ФормаОбъекта
+  kind: object
+  entity: Загрузка
+events:
+  ПриОткрытии: ПриОткрытииФормы
+elements: []
+`)
+	mkFile(t, filepath.Join(dir, "forms", "загрузка", "формаобъекта.form.os"), `Процедура ПриОткрытииФормы()
+  Т = Справочники.Товр.Создать();
+КонецПроцедуры
+`)
+}
