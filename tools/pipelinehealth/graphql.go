@@ -77,6 +77,7 @@ query PipelineHealthSnapshot(
         id
         number
         title
+        body
         url
         createdAt
         updatedAt
@@ -590,6 +591,7 @@ type gqlIssue struct {
 	NodeID    string               `json:"id"`
 	Number    int                  `json:"number"`
 	Title     string               `json:"title"`
+	Body      string               `json:"body"`
 	URL       string               `json:"url"`
 	CreatedAt string               `json:"createdAt"`
 	UpdatedAt string               `json:"updatedAt"`
@@ -610,6 +612,7 @@ func (issue *gqlIssue) UnmarshalJSON(data []byte) error {
 		{"id", &issue.NodeID},
 		{"number", &issue.Number},
 		{"title", &issue.Title},
+		{"body", &issue.Body},
 		{"url", &issue.URL},
 		{"createdAt", &issue.CreatedAt},
 		{"updatedAt", &issue.UpdatedAt},
@@ -1327,6 +1330,7 @@ func convertGQLIssue(raw gqlIssue) (apiIssue, error) {
 	issue := apiIssue{
 		Number:       raw.Number,
 		Title:        raw.Title,
+		Body:         raw.Body,
 		HTMLURL:      raw.URL,
 		CreatedAt:    raw.CreatedAt,
 		UpdatedAt:    raw.UpdatedAt,

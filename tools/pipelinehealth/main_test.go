@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -741,6 +742,55 @@ func issueWithLabels(number int, labels ...string) apiIssue {
 	return item
 }
 
+func TestFixCandidateCarriesVersionedElectionDigest(t *testing.T) {
+	issue := issueWithLabels(42, "approved")
+	issue.Body = "first body"
+	issue.Thread = append(issue.Thread, issueComment(20, "second comment"))
+	digestFor := func(value apiIssue) string {
+		t.Helper()
+		result := analyze(nil, "ivanarama")
+		analyzeIssues(&result, []apiIssue{value}, nil, "ivanarama")
+		if len(result.FixCandidates) != 1 {
+			t.Fatalf("issue is not executable: %+v", result)
+		}
+		return result.FixCandidates[0].EligibilityDigest
+	}
+	initial := digestFor(issue)
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(initial) {
+		t.Fatalf("invalid election revision %q", initial)
+	}
+	reordered := issue
+	reordered.Thread = append([]apiComment(nil), issue.Thread...)
+	reordered.Thread[0], reordered.Thread[1] = reordered.Thread[1], reordered.Thread[0]
+	reordered.Labels = append([]apiLabel{{Name: "queue:p1"}}, issue.Labels...)
+	withPriority := digestFor(reordered)
+	if withPriority == initial {
+		t.Fatal("label change kept the same election revision")
+	}
+	reordered.Labels = append([]apiLabel(nil), issue.Labels...)
+	if digestFor(reordered) != initial {
+		t.Fatal("comment ordering changed the election revision")
+	}
+	edited := issue
+	edited.Body = "edited body"
+	if digestFor(edited) == initial {
+		t.Fatal("body edit kept the same election revision")
+	}
+	edited = issue
+	edited.Thread = append([]apiComment(nil), issue.Thread...)
+	edited.Thread[1].Body = "edited comment"
+	if digestFor(edited) == initial {
+		t.Fatal("comment edit kept the same election revision")
+	}
+	incomplete := issue
+	incomplete.CommentCount = len(issue.Thread) + 1
+	result := analyze(nil, "ivanarama")
+	analyzeIssues(&result, []apiIssue{incomplete}, nil, "ivanarama")
+	if len(result.FixCandidates) != 0 || !hasIssueFinding(result, "fix_issue_incomplete_comments", 42) {
+		t.Fatalf("incomplete snapshot elected: %+v", result)
+	}
+}
+
 func issueComment(id int64, body string) apiComment {
 	timestamp := fmt.Sprintf("2026-09-01T10:%02d:00Z", id%60)
 	return apiComment{ID: id, CreatedAt: timestamp, UpdatedAt: timestamp,
@@ -898,6 +948,9 @@ func TestCLIIssueRouteConflictsAreReportedWithoutChangingRouting(t *testing.T) {
 		var numbers []int
 		for _, item := range queue.items {
 			numbers = append(numbers, item.Number)
+			if queue.name == "FIX" && !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(item.EligibilityDigest) {
+				t.Errorf("public FIX candidate lacks exact election digest: %+v", item)
+			}
 		}
 		if !slices.Equal(numbers, queue.want) {
 			t.Errorf("%s routing changed: got %v, want %v", queue.name, numbers, queue.want)

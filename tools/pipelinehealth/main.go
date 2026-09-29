@@ -81,6 +81,7 @@ type apiPull struct {
 type apiIssue struct {
 	Number       int          `json:"number"`
 	Title        string       `json:"title"`
+	Body         string       `json:"body"`
 	HTMLURL      string       `json:"html_url"`
 	CreatedAt    string       `json:"created_at"`
 	UpdatedAt    string       `json:"updated_at"`
@@ -92,16 +93,19 @@ type apiIssue struct {
 }
 
 type candidate struct {
-	Number         int    `json:"number"`
-	Title          string `json:"title"`
-	URL            string `json:"url"`
-	Head           string `json:"head"`
-	Depth          int    `json:"review_depth"`
-	Stage          string `json:"stage"`
-	Priority       int    `json:"priority"`
-	PrioritySource string `json:"priority_source"`
-	UpdatedAt      string `json:"updated_at"`
-	IntegrationAt  string `json:"-"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+	Head   string `json:"head"`
+	// EligibilityDigest is a 160-bit prefix of a versioned SHA-256 snapshot.
+	// It reserves an issue in the scheduler; it is never mutation authority.
+	EligibilityDigest string `json:"eligibility_digest,omitempty"`
+	Depth             int    `json:"review_depth"`
+	Stage             string `json:"stage"`
+	Priority          int    `json:"priority"`
+	PrioritySource    string `json:"priority_source"`
+	UpdatedAt         string `json:"updated_at"`
+	IntegrationAt     string `json:"-"`
 }
 
 type finding struct {
@@ -602,6 +606,12 @@ func analyzeIssues(result *report, issues []apiIssue, prs []apiPull, owner strin
 				}
 				continue
 			}
+			if issue.CommentCount > len(issue.Thread) {
+				result.addIssue("yellow", "fix_issue_incomplete_comments", issue.Number,
+					"заявка исключена из FIX-очереди: снимок комментариев неполон")
+				continue
+			}
+			item.EligibilityDigest = fixIssueEligibilityDigest(issue)
 			result.FixCandidates = append(result.FixCandidates, item)
 		case labels["needs-decision"]:
 			item.Stage = "human-decision"
@@ -611,6 +621,33 @@ func analyzeIssues(result *report, issues []apiIssue, prs []apiPull, owner strin
 	sortCandidates(result.PlanCandidates)
 	sortCandidates(result.FixCandidates)
 	sortCandidates(result.HumanWaiting)
+}
+
+// fixIssueEligibilityDigest is an election revision, not authorization to
+// change GitHub. A future FIX gate must re-read eligibility and the canonical
+// project protocol immediately before each mutation. The 160-bit prefix fits
+// the scheduler's existing exact-target reservation key (historically HEAD).
+func fixIssueEligibilityDigest(issue apiIssue) string {
+	labels := make([]string, 0, len(issue.Labels))
+	for _, label := range issue.Labels {
+		labels = append(labels, label.Name)
+	}
+	sort.Strings(labels)
+	comments := append([]apiComment(nil), issue.Thread...)
+	sort.Slice(comments, func(i, j int) bool { return comments[i].ID < comments[j].ID })
+	input := struct {
+		Version   int          `json:"version"`
+		Number    int          `json:"number"`
+		State     string       `json:"state"`
+		Title     string       `json:"title"`
+		Body      string       `json:"body"`
+		UpdatedAt string       `json:"updated_at"`
+		Labels    []string     `json:"labels"`
+		Comments  []apiComment `json:"comments"`
+	}{1, issue.Number, issue.State, issue.Title, issue.Body, issue.UpdatedAt, labels, comments}
+	encoded, _ := json.Marshal(input) // fixed Go types cannot fail to marshal
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:20])
 }
 
 func openPullsReferencingIssue(number int, prs []apiPull) []int {
