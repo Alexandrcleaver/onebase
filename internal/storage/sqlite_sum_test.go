@@ -58,6 +58,16 @@ func TestSQLiteSum_ExactAndBuiltinContract(t *testing.T) {
 		{"огромный порядок в числовом префиксе", `SELECT sum(x) FROM (SELECT '1e1000000000x' AS x UNION ALL SELECT '1')`, math.Inf(1)},
 		{"очень малый порядок в тексте", `SELECT sum(x) FROM (SELECT '1e-1000000000' AS x UNION ALL SELECT '1')`, float64(1)},
 		{"пробелы вокруг числа", `SELECT sum(x) FROM (SELECT ' 0.1 ' AS x UNION ALL SELECT '0.2')`, float64(0.3)},
+		// Граница по фактической величине: текст за пределами double — бесконечность,
+		// как у встроенного sum(), а не точное число, которое гасится встречным.
+		{"встречные переполненные тексты дают NULL", `SELECT sum(x) FROM (SELECT '2e308' AS x UNION ALL SELECT '-2e308')`, nil},
+		{"встречные 1e324 дают NULL", `SELECT sum(x) FROM (SELECT '1e324' AS x UNION ALL SELECT '-1e324')`, nil},
+		{"переполненный текст — бесконечность", `SELECT sum(x) FROM (SELECT '2e308' AS x UNION ALL SELECT '1')`, math.Inf(1)},
+		// Точная сумма вышла за диапазон double — дальше бесконечность, как у встроенного.
+		{"переполнение суммы необратимо", `SELECT sum(x) FROM (SELECT '1e308' AS x UNION ALL SELECT '1e308' UNION ALL SELECT '-1e308')`, math.Inf(1)},
+		{"сумма у края диапазона остаётся конечной", `SELECT sum(x) FROM (SELECT '1e308' AS x UNION ALL SELECT '-1e308' UNION ALL SELECT '1e308')`, float64(1e308)},
+		// Неразрывный пробел для SQLite не пробел: строка нечисловая, вклад — ноль.
+		{"неразрывный пробел — не пробел", "SELECT sum(x) FROM (SELECT ' 12' AS x UNION ALL SELECT 1)", float64(1)},
 		{"переполнение фиксированной точки", `SELECT sum(x) FROM (SELECT '9000000000000.000001' AS x UNION ALL SELECT '9000000000000.000001')`, float64(18000000000000.000002)},
 	}
 	for _, c := range cases {

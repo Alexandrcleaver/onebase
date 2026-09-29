@@ -194,6 +194,13 @@ func (s *exactSum) accumulate(n sumNum, remove bool) {
 	} else {
 		s.big = s.big.Add(d)
 	}
+	// Точная сумма вышла за диапазон double — дальше как встроенный sum():
+	// переполнение даёт бесконечность, и следующие конечные слагаемые её уже не
+	// меняют (1e308 + 1e308 − 1e308 = +Inf, а не 1e308).
+	if f, _ := s.big.Float64(); math.IsInf(f, 0) {
+		s.hasSpecial = true
+		s.special = f
+	}
 }
 
 // addFixed прибавляет m × 10^-sc к сумме в фиксированной точке; false —
@@ -262,7 +269,7 @@ func sumText[T ~string | ~[]byte](s T) (sumNum, bool) {
 	}
 	// Экспонента, больше 18 цифр — медленный, но точный путь. Целое из 19 цифр
 	// SQLite по-прежнему считает целым.
-	text := strings.TrimSpace(string(s))
+	text := trimSumSpace(string(s))
 	if i, err := strconv.ParseInt(text, 10, 64); err == nil {
 		return sumNum{m: i}, true
 	}
@@ -295,9 +302,30 @@ func sumDecimalText(text string) (sumNum, bool) {
 		}
 	}
 	if d, err := decimal.NewFromString(text); err == nil {
+		// Граница — фактическая величина, а не только порядок: текст, который
+		// SQLite переводит в бесконечность (2e308, −1e324), остаётся
+		// бесконечностью. Иначе '2e308' и '-2e308' взаимно гасились бы в ноль там,
+		// где встроенный sum() даёт NULL.
+		if f, _ := d.Float64(); math.IsInf(f, 0) {
+			return sumFloat(f), true
+		}
 		return sumNum{d: d, useD: true}, true
 	}
 	return sumNum{}, false
+}
+
+// trimSumSpace снимает по краям только пробельные символы SQLite (ASCII:
+// пробел, \t, \n, \v, \f, \r). Неразрывный пробел числом его не делает —
+// strings.TrimSpace сняла бы и его.
+func trimSumSpace(s string) string {
+	i, j := 0, len(s)
+	for i < j && isSumSpace(s[i]) {
+		i++
+	}
+	for j > i && isSumSpace(s[j-1]) {
+		j--
+	}
+	return s[i:j]
 }
 
 // sumNumericPrefix returns the longest decimal prefix accepted by SQLite's
