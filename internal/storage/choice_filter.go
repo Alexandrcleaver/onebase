@@ -93,6 +93,23 @@ func choicePredicateSQL(d Dialect, entity *metadata.Entity, predicates []ChoiceP
 			next++
 			continue
 		}
+		// Строковый реквизит сравнивается со строкой — значением строкового
+		// конца пути: ВладелецКод дома хранит ИД улицы, а не ссылку на неё.
+		// Решает тип поля, а не значения: ссылочное поле по-прежнему принимает
+		// UUID и строкой. Значение — параметр запроса, а не текст SQL.
+		if field.Type == metadata.FieldTypeString && strings.TrimSpace(field.RefEntity) == "" {
+			if predicate.Op != metadata.FormChoiceOpEqual {
+				return "", nil, startArg, fmt.Errorf("choice filter %d: string field %q supports only eq", i, fieldName)
+			}
+			value, isText := predicate.Value.(string)
+			if !isText {
+				return "", nil, startArg, fmt.Errorf("choice filter %d: string field %q requires a string value", i, fieldName)
+			}
+			parts = append(parts, metadata.ColumnName(*field)+" = "+d.Placeholder(next))
+			args = append(args, value)
+			next++
+			continue
+		}
 		if strings.TrimSpace(field.RefEntity) == "" {
 			return "", nil, startArg, fmt.Errorf("choice filter %d: field %q is not a reference", i, fieldName)
 		}

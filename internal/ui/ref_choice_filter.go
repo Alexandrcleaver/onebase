@@ -177,7 +177,7 @@ func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, f
 			predicates = append(predicates, predicate)
 			continue
 		}
-		value, found, err := s.deepChoiceSourceValue(ctx, owner, form, source, id)
+		value, found, err := s.deepChoiceSourceValue(ctx, owner, form, source, id, choiceTargetFieldIsString(target, condition.Field))
 		if err != nil {
 			return nil, false, err
 		}
@@ -197,35 +197,64 @@ func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, f
 // причины сразу: записи нет, она закрыта строковым доступом, реквизит закрыт
 // полевой политикой или просто пуст. Различать их в ответе нельзя — иначе
 // пустой подбор рассказывал бы, существует ли запись и что в ней лежит.
-func (s *Server) deepChoiceSourceValue(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, source metadata.FormChoiceSource, id uuid.UUID) (uuid.UUID, bool, error) {
+//
+// Конечный реквизит — ссылка (значение uuid.UUID) или строка (значение
+// string, только для строкового реквизита цели — textTarget): так ИД улицы
+// адресного классификатора сравнивается со строковым ВладелецКод дома.
+// Проверки доступа у обоих одинаковые.
+func (s *Server) deepChoiceSourceValue(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, source metadata.FormChoiceSource, id uuid.UUID, textTarget bool) (any, bool, error) {
 	lead := s.reg.GetEntity(formChoiceRefEntity(owner, form, source.Root+"."+source.Field))
 	if lead == nil {
-		return uuid.Nil, false, fmt.Errorf("unknown choice source entity")
+		return nil, false, fmt.Errorf("unknown choice source entity")
 	}
 	attr, exists := entityFieldByName(lead, source.Attr)
-	if !exists || strings.TrimSpace(attr.RefEntity) == "" {
-		return uuid.Nil, false, fmt.Errorf("choice source attribute %q is not a reference", source.Attr)
+	isRef := exists && strings.TrimSpace(attr.RefEntity) != ""
+	isText := exists && !isRef && attr.Type == metadata.FieldTypeString
+	if !isRef && !isText {
+		return nil, false, fmt.Errorf("choice source attribute %q is neither a reference nor a string", source.Attr)
+	}
+	// Род конца пути сверяется с реквизитом цели по метаданным, до чтения
+	// записи: ошибка, которая зависела бы от того, нашлась ли запись, выдала
+	// бы её существование.
+	if isText != textTarget {
+		return nil, false, fmt.Errorf("choice source attribute %q does not match the filtered field", source.Attr)
 	}
 	if choiceAttrMasked(s.fieldDecisions(ctx, lead), attr.Name) {
-		return uuid.Nil, false, nil
+		return nil, false, nil
 	}
 	params, err := s.rowFilterFor(ctx, lead, "read", storage.ListParams{})
 	if err != nil {
-		return uuid.Nil, false, nil // нет доступа к посреднику — отбирать нечем
+		return nil, false, nil // нет доступа к посреднику — отбирать нечем
 	}
 	rows, err := s.store.GetFieldsByIDsFiltered(ctx, lead, []uuid.UUID{id}, []metadata.Field{attr}, params.RowFilter)
 	if err != nil {
-		return uuid.Nil, false, err
+		return nil, false, err
 	}
 	row, ok := rows[id.String()]
 	if !ok {
-		return uuid.Nil, false, nil
+		return nil, false, nil
+	}
+	if isText {
+		// Строка сравнивается как есть — так же, как `=` в запросе. Пустая
+		// или из одних пробелов — отбирать нечем, как и пустая ссылка.
+		text, _ := row[attr.Name].(string)
+		if strings.TrimSpace(text) == "" {
+			return nil, false, nil
+		}
+		return text, true, nil
 	}
 	target, parseErr := uuid.Parse(strings.TrimSpace(refValueString(row[attr.Name])))
 	if parseErr != nil || target == uuid.Nil {
-		return uuid.Nil, false, nil
+		return nil, false, nil
 	}
 	return target, true, nil
+}
+
+// choiceTargetFieldIsString — строковый нессылочный ли реквизит
+// справочника-цели: только с ним сравнивается строковый конец пути.
+func choiceTargetFieldIsString(target *metadata.Entity, name string) bool {
+	field, ok := entityFieldByName(target, name)
+	return ok && field.Type == metadata.FieldTypeString && strings.TrimSpace(field.RefEntity) == ""
 }
 
 // choiceAttrMasked — закрыт ли реквизит полевой политикой. Ключи
