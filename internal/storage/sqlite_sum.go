@@ -59,14 +59,20 @@ type exactSum struct {
 	scale int32
 	isBig bool
 	big   decimal.Decimal
+	// SQLite keeps IEEE infinities (and returns NULL for NaN). Once an
+	// infinity enters the sum, follow its floating-point window arithmetic.
+	hasSpecial bool
+	special    float64
 }
 
 // sumNum — слагаемое: m × 10^-sc либо, если так не выразить, d.
 type sumNum struct {
-	m    int64
-	sc   int32
-	d    decimal.Decimal
-	useD bool
+	m          int64
+	sc         int32
+	d          decimal.Decimal
+	useD       bool
+	special    float64
+	useSpecial bool
 }
 
 func (s *exactSum) Step(_ *sqlite.FunctionContext, args []driver.Value) error {
@@ -90,6 +96,12 @@ func (s *exactSum) WindowValue(*sqlite.FunctionContext) (driver.Value, error) {
 	}
 	if s.ovrfl {
 		return nil, errSumIntegerOverflow
+	}
+	if s.hasSpecial {
+		if math.IsNaN(s.special) {
+			return nil, nil
+		}
+		return s.special, nil
 	}
 	total := s.big
 	if !s.isBig {
@@ -135,8 +147,33 @@ func (s *exactSum) add(v driver.Value, remove bool) {
 }
 
 func (s *exactSum) accumulate(n sumNum, remove bool) {
-	if !s.isBig && !n.useD {
-		m := n.m // |m| < 10^18, смена знака безопасна
+	if s.hasSpecial {
+		if n.useSpecial {
+			if remove {
+				s.special -= n.special
+			} else {
+				s.special += n.special
+			}
+		}
+		return
+	}
+	if n.useSpecial {
+		total := s.big
+		if !s.isBig {
+			total = decimal.New(s.fixed, -s.scale)
+		}
+		s.special, _ = total.Float64()
+		s.hasSpecial = true
+		if remove {
+			s.special -= n.special
+		} else {
+			s.special += n.special
+		}
+		return
+	}
+	// -MinInt64 overflows before addFixed can detect it.
+	if !s.isBig && !n.useD && !(remove && n.m == math.MinInt64) {
+		m := n.m
 		if remove {
 			m = -m
 		}
@@ -210,7 +247,7 @@ func sumOperand(v driver.Value) (n sumNum, isInt, ok bool) {
 // дробью рядом с ней).
 func sumFloat(x float64) sumNum {
 	if math.IsNaN(x) || math.IsInf(x, 0) {
-		return sumNum{}
+		return sumNum{special: x, useSpecial: true}
 	}
 	var buf [32]byte
 	if m, sc, _, ok := parseFixed(strconv.AppendFloat(buf[:0], x, 'f', -1, 64)); ok {
@@ -232,7 +269,57 @@ func sumText[T ~string | ~[]byte](s T) (sumNum, bool) {
 	if d, err := decimal.NewFromString(text); err == nil {
 		return sumNum{d: d, useD: true}, false
 	}
+	// SQLite's sum() accepts a numeric prefix even when the rest of a TEXT or
+	// BLOB value is not numeric. Such values are REAL, including "12x".
+	if end := sumNumericPrefix(text); end > 0 {
+		prefix := text[:end]
+		if d, err := decimal.NewFromString(prefix); err == nil {
+			return sumNum{d: d, useD: true}, false
+		}
+		if f, err := strconv.ParseFloat(prefix, 64); err == nil || math.IsInf(f, 0) {
+			return sumFloat(f), false
+		}
+	}
 	return sumNum{}, false // не число: ноль, результат REAL
+}
+
+// sumNumericPrefix returns the longest decimal prefix accepted by SQLite's
+// numeric conversion. An exponent belongs to the prefix only with digits.
+func sumNumericPrefix(s string) int {
+	i := 0
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	digits := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+		digits++
+	}
+	if i < len(s) && s[i] == '.' {
+		i++
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+			digits++
+		}
+	}
+	if digits == 0 {
+		return 0
+	}
+	end := i
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		start := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i > start {
+			end = i
+		}
+	}
+	return end
 }
 
 // parseFixed разбирает десятичную запись [пробелы][знак]цифры[.цифры][пробелы]

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -43,6 +44,12 @@ func TestSQLiteSum_ExactAndBuiltinContract(t *testing.T) {
 		{"пустой набор — NULL", `SELECT sum(x) FROM (SELECT 1 AS x) WHERE 0`, nil},
 		{"только NULL — NULL", `SELECT sum(x) FROM (SELECT NULL AS x UNION ALL SELECT NULL)`, nil},
 		{"нечисловой текст — ноль и REAL", `SELECT sum(x) FROM (SELECT 'abc' AS x UNION ALL SELECT 1)`, float64(1)},
+		{"числовой префикс текста", `SELECT sum(x) FROM (SELECT '12x' AS x UNION ALL SELECT 1)`, float64(13)},
+		{"дробный префикс текста", `SELECT sum(x) FROM (SELECT '0.1x' AS x UNION ALL SELECT '0.2')`, float64(0.3)},
+		{"экспонента перед хвостом", `SELECT sum(x) FROM (SELECT '1e2x' AS x UNION ALL SELECT 1)`, float64(101)},
+		{"бесконечный REAL", `SELECT sum(1e400)`, math.Inf(1)},
+		{"отрицательный бесконечный REAL", `SELECT sum(-1e400)`, math.Inf(-1)},
+		{"встречные бесконечности дают NULL", `SELECT sum(x) FROM (SELECT 1e400 AS x UNION ALL SELECT -1e400)`, nil},
 		{"сравнение суммы с нулём", `SELECT sum(x) > 0 FROM (SELECT '0.1' AS x UNION ALL SELECT '0.2' UNION ALL SELECT '-0.3')`, int64(0)},
 		// Медленный путь: всё, что не помещается в 18 цифр фиксированной точки.
 		{"целое из 19 цифр в тексте", `SELECT sum(x) FROM (SELECT '9000000000000000000' AS x UNION ALL SELECT '1')`, int64(9000000000000000001)},
@@ -93,6 +100,29 @@ func TestSQLiteSum_ExactAndBuiltinContract(t *testing.T) {
 			if got[i] != want[i] {
 				t.Fatalf("окно %d: получили %#v, ждали %#v (все: %v)", i+1, got[i], want[i], got)
 			}
+		}
+	})
+
+	t.Run("удаление MinInt64 из окна", func(t *testing.T) {
+		rows, err := db.Query(ctx, `SELECT sum(x) OVER (ORDER BY i ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)
+			FROM (SELECT 1 AS i, 0.0 AS x UNION ALL SELECT 2, -9223372036854775808
+			UNION ALL SELECT 3, 9223372036854775807 UNION ALL SELECT 4, 1
+			UNION ALL SELECT 5, 2 UNION ALL SELECT 6, 3)`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var got any
+		for rows.Next() {
+			if err := rows.Scan(&got); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if got != float64(9223372036854776000) {
+			t.Fatalf("последнее окно: получили %#v, ждали положительную сумму", got)
 		}
 	})
 }
