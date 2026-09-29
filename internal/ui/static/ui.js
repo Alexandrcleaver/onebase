@@ -3319,6 +3319,9 @@ function obInitFormDelegates() {
       var form = document.getElementById(submitInput.getAttribute('data-ob-submit-form') || '');
       if (form) form.submit();
     }
+    // Сменили владельца (контрагента, направление) — перестраиваем списки,
+    // которые по нему отбираются.
+    if (e.target.name) obRefreshDependentSelects(e.target);
   });
   document.addEventListener('submit', function (e) {
     var form = e.target;
@@ -3386,6 +3389,7 @@ function addTpRow(tpName, fields, numFields, idx, tbodyOverride, virtualFields, 
       if (meta && meta.entity) {
         sel.setAttribute('data-ref-entity', meta.entity);
         if (meta.allowCreate) sel.setAttribute('data-ref-allow-create', '1');
+        if (meta.filter) sel.setAttribute('data-ref-filter', meta.filter);
       }
       var defOpt = document.createElement('option');
       defOpt.value = '';
@@ -4015,6 +4019,100 @@ function openItemPicker(payload, elementName, eventContext, request) {
   });
 }
 
+// ── Отбор подбора: подчинённые справочники и связи параметров выбора ──────────
+//
+// Разметка несёт на поле data-ref-filter вида
+//     {"Владелец":{"from":"Контрагент","value":"<uuid>"}}
+// «from» — имя поля-источника НА ЭТОЙ ЖЕ форме, «value» — его значение на момент
+// отрисовки. Живое поле важнее: пользователь мог сменить контрагента секунду
+// назад, до того как форма съездила на сервер. Значение из разметки — запасной
+// вариант для источника, которого на форме нет (реквизит объекта, не вынесенный
+// на форму).
+function obRefFilterValues(sel) {
+  if (!sel || !sel.getAttribute) return null;
+  var raw = sel.getAttribute('data-ref-filter');
+  if (!raw) return null;
+  var spec;
+  try { spec = JSON.parse(raw); } catch (e) { return null; }
+  var scope = (sel.closest && sel.closest('form')) || document;
+  var out = {};
+  var any = false;
+  for (var key in spec) {
+    if (!Object.prototype.hasOwnProperty.call(spec, key)) continue;
+    var item = spec[key] || {};
+    var value = item.value || '';
+    if (item.from) {
+      var src = scope.querySelector('[name="' + (window.CSS && CSS.escape ? CSS.escape(item.from) : item.from) + '"]');
+      if (src) value = src.value || '';
+    }
+    // Ключ кладём даже с пустым значением: сервер по нему отличает «владельца
+    // ещё не выбрали» (список пуст) от «на этой форме владельца не спрашивают»
+    // (список целиком).
+    out[key] = value;
+    any = true;
+  }
+  return any ? out : null;
+}
+
+// obRefFilterParam — тот же отбор строкой для запроса /ui/_ref-options.
+function obRefFilterParam(sel) {
+  var values = obRefFilterValues(sel);
+  if (!values) return '';
+  return '&flt=' + encodeURIComponent(JSON.stringify(values));
+}
+window.obRefFilterParam = obRefFilterParam;
+
+// obRefreshDependentSelects — сменили контрагента: списки, отобранные по нему,
+// перестраиваем сразу, не дожидаясь перерисовки формы. Значение, выпавшее из
+// нового отбора, очищаем: договор чужого контрагента в поле — это молча
+// сохранённая ошибка, а пустое поле человек видит.
+function obRefreshDependentSelects(sourceEl) {
+  if (!sourceEl || !sourceEl.name || !window.fetch) return;
+  var scope = (sourceEl.closest && sourceEl.closest('form')) || document;
+  var targets = scope.querySelectorAll('select[data-ref-filter]');
+  for (var i = 0; i < targets.length; i++) {
+    (function (sel) {
+      var raw = sel.getAttribute('data-ref-filter');
+      if (!raw || raw.indexOf('"' + sourceEl.name + '"') < 0) return;
+      var entity = sel.getAttribute('data-ref-entity') || '';
+      if (!entity) return;
+      // У managed-поля с choice_filter есть один владелец запроса и один
+      // sequence gate. Два независимых ответа перезаписывали друг другу select.
+      if (sel.getAttribute('data-ref-choice-context')) {
+        obRefreshChoiceSelect(sel, true);
+        return;
+      }
+      var filter = obRefFilterParam(sel);
+      var seq = (sel._obOwnerRefreshSeq || 0) + 1;
+      sel._obOwnerRefreshSeq = seq;
+      var url = '/ui/_ref-options/' + encodeURIComponent(entity) + '?limit=50' + filter;
+      fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+        .then(function (resp) { return resp.ok ? resp.json() : null; })
+        .then(function (data) {
+          // An older response must not replace options for a newer owner,
+          // including when the user has switched A → B → A in the meantime.
+          if (!data || sel._obOwnerRefreshSeq !== seq || obRefFilterParam(sel) !== filter) return;
+          var rows = data.items || [];
+          var current = sel.value;
+          var keep = false;
+          while (sel.options.length) sel.remove(0);
+          var empty = document.createElement('option');
+          empty.value = '';
+          empty.textContent = '— выбрать —';
+          sel.appendChild(empty);
+          for (var j = 0; j < rows.length; j++) {
+            var opt = document.createElement('option');
+            opt.value = rows[j].id;
+            opt.textContent = rows[j]._label != null ? rows[j]._label : rows[j].id;
+            if (String(opt.value) === String(current)) keep = true;
+            sel.appendChild(opt);
+          }
+          sel.value = keep ? current : '';
+        })
+        .catch(function () {});
+    })(targets[i]);
+  }
+}
 // refContextForRequest собирает choice_context из ТЕКУЩИХ контролов формы.
 // В data-ref-context лежит карта «параметр → путь», а не значения серверного
 // рендера: пользователь мог поменять Филиал уже после открытия карточки.
@@ -4113,10 +4211,12 @@ function obRefChoiceSnapshot(sel) {
     '&element=' + encodeURIComponent(ctx.element) +
     '&sources=' + encodeURIComponent(JSON.stringify(values));
   if (sel.value) query += '&selected_id=' + encodeURIComponent(sel.value);
+  var ownerQuery = obRefFilterParam(sel);
+  query += ownerQuery;
   var fingerprintParts = paths.map(function (path) { return [path, values[path]]; });
   return {
     query: query,
-    fingerprint: JSON.stringify([ctx.form_entity, ctx.form, ctx.element, fingerprintParts]),
+    fingerprint: JSON.stringify([ctx.form_entity, ctx.form, ctx.element, fingerprintParts, ownerQuery]),
     selected: sel.value == null ? '' : String(sel.value)
   };
 }
@@ -4527,6 +4627,8 @@ function openRefPicker(selOrId) {
     var refContextRaw = sel.getAttribute('data-ref-context') || '';
     var usePreviewPage = !!refContextRaw;
     var url = '/ui/_ref-options/' + encodeURIComponent(refEntity) + '?limit=50&q=' + encodeURIComponent(q || '') + choiceQuery;
+    // Отбор подбора: владелец подчинённого справочника.
+    if (!choiceSnapshot) url += obRefFilterParam(sel);
     var fetchOptions = { credentials: 'same-origin', headers: { 'Accept': 'application/json' } };
     if (requestController) fetchOptions.signal = requestController.signal;
     if (usePreviewPage) {
@@ -4546,7 +4648,8 @@ function openRefPicker(selOrId) {
       fetchOptions.body = JSON.stringify({
         q: q || '', limit: 50, offset: 0,
         source: { entity: refEntity, element: sourceElement },
-        context: contextValues
+        context: contextValues,
+        filters: obRefFilterValues(sel) || {}
       });
     }
     fetch(url, fetchOptions)
