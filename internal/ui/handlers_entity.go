@@ -668,6 +668,36 @@ func dropAdminOnlyFields(form *metadata.FormModule, fields map[string]any, admin
 	return dropped
 }
 
+// removeSubmittedFormFields removes rejected values from every parsed POST map.
+// Default restoration must treat these fields as absent, including multipart
+// form events, rather than interpreting a forged value as an explicit submit.
+func removeSubmittedFormFields(r *http.Request, names []string) {
+	for _, name := range names {
+		for key := range r.Form {
+			if strings.EqualFold(key, name) {
+				delete(r.Form, key)
+			}
+		}
+		for key := range r.PostForm {
+			if strings.EqualFold(key, name) {
+				delete(r.PostForm, key)
+			}
+		}
+		if r.MultipartForm != nil {
+			for key := range r.MultipartForm.Value {
+				if strings.EqualFold(key, name) {
+					delete(r.MultipartForm.Value, key)
+				}
+			}
+			for key := range r.MultipartForm.File {
+				if strings.EqualFold(key, name) {
+					delete(r.MultipartForm.File, key)
+				}
+			}
+		}
+	}
+}
+
 // formElementFieldName — реквизит записи из двухсегментного data_path
 // «Объект.<Реквизит>». Для пути другой формы возвращает пустую строку:
 // колонку табличной части и реквизит формы этот путь не запирает, и check
@@ -739,9 +769,9 @@ func (s *Server) parseSubmitForm(w http.ResponseWriter, r *http.Request, entity 
 	// editable_admin_only: значения запертых полей отбрасываем ЗДЕСЬ, на сервере.
 	// Разметка запрета — подсказка интерфейсу, а не защита: POST её не
 	// спрашивает, и без этого запрет снимался бы подделанной формой или любым
-	// клиентом. Ключ просто удаляется из карты — у существующей записи прежнее
-	// значение остаётся нетронутым, у новой применяется значение по умолчанию.
-	dropAdminOnlyFields(form, fields, s.isAdmin(r))
+	// клиентом. Удаляем ключ и из полей объекта, и из признаков отправки:
+	// у существующей записи остаётся прежнее значение, у новой — умолчание.
+	removeSubmittedFormFields(r, dropAdminOnlyFields(form, fields, s.isAdmin(r)))
 
 	mergeSubmittedEntityServiceFields(r, entity, fields)
 

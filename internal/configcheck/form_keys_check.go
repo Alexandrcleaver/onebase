@@ -44,6 +44,36 @@ func CheckFormAdminOnly(proj *project.Project) []Issue {
 	return issues
 }
 
+// CheckFormChoiceFolders requires the stable element id used by the picker
+// context. Without it, applyManagedChoiceFilters skips the field entirely.
+func CheckFormChoiceFolders(proj *project.Project) []Issue {
+	if proj == nil {
+		return nil
+	}
+	var issues []Issue
+	forEachProjectForm(proj, func(owner *metadata.Entity, form *metadata.FormModule) {
+		idCount := make(map[string]int)
+		form.Walk(func(el *metadata.FormElement) bool {
+			if el != nil && strings.TrimSpace(el.ID) != "" {
+				idCount[strings.TrimSpace(el.ID)]++
+			}
+			return true
+		})
+		form.Walk(func(el *metadata.FormElement) bool {
+			if el == nil || !el.ChoiceFolders || el.ChoiceFilter != nil {
+				return true // choice_filter already checks this id
+			}
+			if id := strings.TrimSpace(el.ID); id == "" || id != el.ID || idCount[id] != 1 {
+				issues = append(issues, formKeyIssue(owner, form, el, "form.choice-folders",
+					"choice_folders требует непустой уникальный стабильный id элемента",
+					"Задайте уникальный id, чтобы серверный контекст подбора применял ключ."))
+			}
+			return true
+		})
+	})
+	return issues
+}
+
 // CheckFormKeyPlacement предупреждает о ключах, которые в этом месте рантайм не
 // применит: scroll_x вне горизонтальной группы, primary вне кнопки,
 // choice_dropdown и choice_folders вне ссылочного поля, choice_folders у

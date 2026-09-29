@@ -125,6 +125,35 @@ func TestCheckFormKeyPlacementWarnsAboutIgnoredKeys(t *testing.T) {
 	}
 }
 
+func TestRunFullRejectsChoiceFoldersWithoutStableID(t *testing.T) {
+	dir := t.TempDir()
+	mkFile(t, filepath.Join(dir, "catalogs", "адресныйклассификатор.yaml"), `name: АдресныйКлассификатор
+hierarchical: true
+fields:
+  - {name: Наименование, type: string}
+`)
+	mkFile(t, filepath.Join(dir, "documents", "заявка.yaml"), `name: Заявка
+fields:
+  - {name: НаселённыйПункт, type: "reference:АдресныйКлассификатор"}
+`)
+	mkFile(t, filepath.Join(dir, "forms", "заявка", "объекта.form.yaml"), `schema: onebase.form/v1
+form:
+  name: Объекта
+  kind: object
+  entity: Заявка
+elements:
+  - kind: ПолеВвода
+    name: ПолеГород
+    data_path: Объект.НаселённыйПункт
+    choice: true
+    choice_folders: true
+`)
+	result := RunFullWithOptions(dir, Options{Lint: true})
+	if result.OK || !strings.Contains(messages(result.Issues), "form.choice-folders") {
+		t.Fatalf("check пропустил неработающий choice_folders без id: %+v", result)
+	}
+}
+
 // Ключ, которого не знает линтер, на обязательном гейте CI становится ошибкой:
 // конфигурация, использующая поддержанный ключ, обязана проходить свою же
 // проверку.

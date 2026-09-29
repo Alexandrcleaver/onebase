@@ -774,18 +774,7 @@ func (s *Server) handleManagedFormEventMode(w http.ResponseWriter, r *http.Reque
 	// присланные значения запертых полей из объекта и POST: последующее
 	// restoreUnsubmittedFields восстановит каноничное значение из БД.
 	if !s.isAdmin(r) {
-		for _, name := range dropAdminOnlyFields(form, obj.Fields, false) {
-			for key := range r.Form {
-				if strings.EqualFold(key, name) {
-					delete(r.Form, key)
-				}
-			}
-			for key := range r.PostForm {
-				if strings.EqualFold(key, name) {
-					delete(r.PostForm, key)
-				}
-			}
-		}
+		removeSubmittedFormFields(r, dropAdminOnlyFields(form, obj.Fields, false))
 	}
 
 	// Дочитать поля, которых нет на форме (или которые пришли disabled), из БД —

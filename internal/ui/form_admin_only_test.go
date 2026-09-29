@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"strings"
 	"testing"
 
@@ -42,7 +43,7 @@ func adminOnlyFixture(t *testing.T) (*Server, *metadata.Entity, uuid.UUID) {
 		Name: "Звонок", Kind: metadata.KindCatalog,
 		Fields: []metadata.Field{
 			{Name: "Наименование", Type: metadata.FieldTypeString},
-			{Name: "ТипЗвонка", Type: metadata.FieldTypeString},
+			{Name: "ТипЗвонка", Type: metadata.FieldTypeString, Default: "Входящий по умолчанию"},
 			{Name: "Комментарий", Type: metadata.FieldTypeString},
 		},
 		Forms: []*metadata.FormModule{form},
@@ -147,6 +148,46 @@ func TestEditableAdminOnlyDropsForgedValueOnWrite(t *testing.T) {
 	}
 	if got := fmt.Sprint(row["ТипЗвонка"]); got != "Исходящий" {
 		t.Fatalf("администратор не смог изменить поле: %q", got)
+	}
+}
+
+func TestEditableAdminOnlyForgedNewValuePreservesDefault(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body url.Values
+	}{
+		{"поле не прислано", url.Values{"Наименование": {"новый"}, "Комментарий": {"обычное поле"}}},
+		{"поле подделано", url.Values{"Наименование": {"новый"}, "ТипЗвонка": {"Подделка"}, "Комментарий": {"обычное поле"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv, ent, _ := adminOnlyFixture(t)
+			req := reqWithChi(http.MethodPost, "/ui/catalog/"+ent.Name+"/new", test.body,
+				map[string]string{"entity": ent.Name})
+			req = req.WithContext(auth.ContextWithUser(req.Context(), adminOnlyOperator(ent.Name)))
+			rec := httptest.NewRecorder()
+			srv.submit(rec, req)
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("запись не прошла: %d %s", rec.Code, rec.Body.String())
+			}
+			location, err := url.Parse(rec.Header().Get("Location"))
+			if err != nil {
+				t.Fatalf("некорректный адрес записи: %v", err)
+			}
+			id, err := uuid.Parse(path.Base(location.Path))
+			if err != nil {
+				t.Fatalf("нет id новой записи: %v", err)
+			}
+			row, err := srv.store.GetByID(t.Context(), ent.Name, id, ent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fmt.Sprint(row["ТипЗвонка"]); got != "Входящий по умолчанию" {
+				t.Fatalf("защищённый дефолт изменился: %q", got)
+			}
+			if got := fmt.Sprint(row["Комментарий"]); got != "обычное поле" {
+				t.Fatalf("обычное поле не записалось: %q", got)
+			}
+		})
 	}
 }
 
