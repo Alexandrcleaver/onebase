@@ -10,10 +10,9 @@ import (
 // Execute the panel code from the rendered editor: a server-only round trip
 // cannot catch an operator silently rewritten by the browser before POST.
 func TestFormsEditor_ChoiceFilterEqualOrEmptyPanel(t *testing.T) {
-	engine, err := exec.LookPath("node")
-	if err != nil {
-		engine = "/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc"
-		if _, err := exec.LookPath(engine); err != nil {
+	_, nodeErr := exec.LookPath("node")
+	if nodeErr != nil {
+		if _, err := exec.LookPath("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc"); err != nil {
 			t.Skip("JavaScript engine is required for the choice filter panel test")
 		}
 	}
@@ -79,7 +78,12 @@ equal(secondMode.disabled, true, 'switching to eq_or_empty disables boolean mode
 `
 	// eval the function from the page in the same global scope as its DOM stubs.
 	script := testScript[:strings.Index(testScript, "const panel =")] + "\neval(" + strconv.Quote(page[start:start+end]) + ");\n" + testScript[strings.Index(testScript, "const panel ="):]
-	cmd := exec.Command(engine, "-e", script)
+	var cmd *exec.Cmd
+	if nodeErr == nil {
+		cmd = exec.Command("node", "-e", script)
+	} else {
+		cmd = exec.Command("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc", "-e", script)
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("rendered choice filter panel: %v\n%s", err, out)
 	}
