@@ -774,7 +774,18 @@ func (s *Server) handleManagedFormEventMode(w http.ResponseWriter, r *http.Reque
 	// присланные значения запертых полей из объекта и POST: последующее
 	// restoreUnsubmittedFields восстановит каноничное значение из БД.
 	if !s.isAdmin(r) {
-		removeSubmittedFormFields(r, dropAdminOnlyFields(form, obj.Fields, false))
+		dropped := dropAdminOnlyFields(form, obj.Fields, false)
+		removeSubmittedFormFields(r, dropped)
+		// У НОВОЙ записи восстанавливать нечего: строки ещё нет, а присланное
+		// значение запрещено. Без умолчания обработчик, вызвавший
+		// Объект.Записать(), сохранил бы NULL — то есть запрет на правку
+		// оборачивался бы потерей объявленного значения.
+		if strings.TrimSpace(r.FormValue("_id")) == "" {
+			if err := s.applyAdminOnlyDefaults(r.Context(), entity, obj, dropped); err != nil {
+				respondJSON(enc, formEventResponse{Error: s.errText(r, err)})
+				return
+			}
+		}
 	}
 
 	// Дочитать поля, которых нет на форме (или которые пришли disabled), из БД —
@@ -1782,6 +1793,30 @@ func (st formEventState) response(ok bool) formEventResponse {
 type elementStates struct {
 	ReadOnly map[string]bool `json:"readonly,omitempty"`
 	Hidden   map[string]bool `json:"hidden,omitempty"`
+}
+
+// applyAdminOnlyDefaults возвращает новой записи объявленные умолчания ровно
+// тех полей, значения которых сервер только что отклонил как запертые.
+//
+// Заполняются только отклонённые поля. Событие формы и сегодня не пересчитывает
+// остальные неприсланные реквизиты и не зовёт ПриСозданииНового — расширять это
+// здесь значило бы менять поведение событийного пути под видом починки запрета.
+func (s *Server) applyAdminOnlyDefaults(ctx context.Context, entity *metadata.Entity, obj *runtime.Object, names []string) error {
+	if s.entitySvc == nil || entity == nil || obj == nil || len(names) == 0 {
+		return nil
+	}
+	defaults := map[string]any{}
+	if _, err := s.entitySvc.ApplyDefaults(ctx, entity, defaults, entityservice.DefaultsOptions{FormEntry: true}); err != nil {
+		return err
+	}
+	for _, name := range names {
+		value, ok := maskCIKeyValue(defaults, name)
+		if !ok || value == nil {
+			continue
+		}
+		obj.Set(name, value)
+	}
+	return nil
 }
 
 // formElementStates пересчитывает readonly_when/hidden_when по значениям формы

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ivantit66/onebase/internal/auth"
 	"github.com/ivantit66/onebase/internal/metadata"
+	"github.com/ivantit66/onebase/internal/storage"
 )
 
 // editable_admin_only — запрет по тому, КТО смотрит, а не по данным записи.
@@ -280,4 +281,83 @@ func TestEditableAdminOnlyRejectsForgedValueOnCloseIntent(t *testing.T) {
 	if got := fmt.Sprint(row["ТипЗвонка"]); got != "Входящий" {
 		t.Fatalf("закрытие записало подделанное значение: %q", got)
 	}
+}
+
+// Новая запись из события формы: восстанавливать значение неоткуда — строки ещё
+// нет, а присланное запрещено. Без серверного умолчания запрет на правку
+// оборачивался бы потерей объявленного значения: обработчик с Объект.Записать()
+// сохранял NULL вместо «Входящий по умолчанию».
+func TestEditableAdminOnlyKeepsDeclaredDefaultOnFormEventCreate(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		field []string
+	}{
+		{"поле не прислано", nil},
+		{"поле подделано", []string{"Подделка"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv, ent, _ := adminOnlyFixture(t)
+			ent.Forms[0].ProgramAST = mustParse(t, `
+Процедура Пусто()
+    Объект.Записать();
+КонецПроцедуры`)
+			body := url.Values{
+				"_element": {"Кн"}, "_event": {string(metadata.FormEventOnClick)},
+				"_kind":        {"object"},
+				"Наименование": {"новый из события"},
+				"Комментарий":  {"обычное поле"},
+			}
+			if test.field != nil {
+				body["ТипЗвонка"] = test.field
+			}
+			rec := runFormEventAs(t, srv, ent, body, adminOnlyOperator(ent.Name))
+			if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"ok":false`) {
+				t.Fatalf("событие не прошло: %d %s", rec.Code, rec.Body.String())
+			}
+			row := storedByName(t, srv, ent, "новый из события")
+			if got := fmt.Sprint(row["ТипЗвонка"]); got != "Входящий по умолчанию" {
+				t.Fatalf("новая запись потеряла защищённое умолчание: %q", got)
+			}
+			if got := fmt.Sprint(row["Комментарий"]); got != "обычное поле" {
+				t.Fatalf("обычное поле не записалось: %q", got)
+			}
+		})
+	}
+}
+
+// Тот же путь при закрытии формы с сохранением: close-intent пишет объект сам,
+// и новая запись обязана получить то же умолчание.
+func TestEditableAdminOnlyKeepsDeclaredDefaultOnCloseIntentCreate(t *testing.T) {
+	srv, ent, _ := adminOnlyFixture(t)
+	body := closeIntentBody(uuid.NewString(), "ok", "новый при закрытии")
+	body.Set("_close_mode", "save")
+	body.Set("Наименование", "новый при закрытии")
+	body.Set("ТипЗвонка", "Подделка")
+	body.Set("Комментарий", "обычное поле")
+	rec := executeFormCloseIntentAsUser(t, srv, ent, body, adminOnlyOperator(ent.Name))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("закрытие не прошло: %d %s", rec.Code, rec.Body.String())
+	}
+	row := storedByName(t, srv, ent, "новый при закрытии")
+	if got := fmt.Sprint(row["ТипЗвонка"]); got != "Входящий по умолчанию" {
+		t.Fatalf("новая запись при закрытии потеряла защищённое умолчание: %q", got)
+	}
+}
+
+// storedByName находит записанный объект по наименованию: у новой записи id
+// выдаёт сервер, и снаружи он известен только из ответа, который в этих
+// сценариях не обязан его возвращать.
+func storedByName(t *testing.T, srv *Server, ent *metadata.Entity, name string) map[string]any {
+	t.Helper()
+	rows, err := srv.store.List(t.Context(), ent.Name, ent, storage.ListParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if fmt.Sprint(row["Наименование"]) == name {
+			return row
+		}
+	}
+	t.Fatalf("запись %q не сохранилась: %+v", name, rows)
+	return nil
 }
