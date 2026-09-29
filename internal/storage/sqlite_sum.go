@@ -172,7 +172,7 @@ func (s *exactSum) accumulate(n sumNum, remove bool) {
 		return
 	}
 	// -MinInt64 overflows before addFixed can detect it.
-	if !s.isBig && !n.useD && !(remove && n.m == math.MinInt64) {
+	if !s.isBig && !n.useD && (!remove || n.m != math.MinInt64) {
 		m := n.m
 		if remove {
 			m = -m
@@ -266,21 +266,38 @@ func sumText[T ~string | ~[]byte](s T) (sumNum, bool) {
 	if i, err := strconv.ParseInt(text, 10, 64); err == nil {
 		return sumNum{m: i}, true
 	}
-	if d, err := decimal.NewFromString(text); err == nil {
-		return sumNum{d: d, useD: true}, false
+	if n, ok := sumDecimalText(text); ok {
+		return n, false
 	}
 	// SQLite's sum() accepts a numeric prefix even when the rest of a TEXT or
 	// BLOB value is not numeric. Such values are REAL, including "12x".
 	if end := sumNumericPrefix(text); end > 0 {
 		prefix := text[:end]
-		if d, err := decimal.NewFromString(prefix); err == nil {
-			return sumNum{d: d, useD: true}, false
-		}
-		if f, err := strconv.ParseFloat(prefix, 64); err == nil || math.IsInf(f, 0) {
-			return sumFloat(f), false
+		if n, ok := sumDecimalText(prefix); ok {
+			return n, false
 		}
 	}
 	return sumNum{}, false // не число: ноль, результат REAL
+}
+
+// An enormous exponent in a short input can make decimal.Add materialize an
+// enormous power of ten. SQLite converts these operands to REAL; use that
+// conversion outside the bounded range needed for finite float64 values.
+func sumDecimalText(text string) (sumNum, bool) {
+	if i := strings.LastIndexAny(text, "eE"); i >= 0 {
+		exp, err := strconv.ParseInt(text[i+1:], 10, 32)
+		if err != nil || exp > 324 || exp < -324 {
+			f, err := strconv.ParseFloat(text, 64)
+			if err == nil || errors.Is(err, strconv.ErrRange) {
+				return sumFloat(f), true
+			}
+			return sumNum{}, false
+		}
+	}
+	if d, err := decimal.NewFromString(text); err == nil {
+		return sumNum{d: d, useD: true}, true
+	}
+	return sumNum{}, false
 }
 
 // sumNumericPrefix returns the longest decimal prefix accepted by SQLite's

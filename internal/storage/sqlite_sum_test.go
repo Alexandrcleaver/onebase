@@ -54,6 +54,9 @@ func TestSQLiteSum_ExactAndBuiltinContract(t *testing.T) {
 		// Медленный путь: всё, что не помещается в 18 цифр фиксированной точки.
 		{"целое из 19 цифр в тексте", `SELECT sum(x) FROM (SELECT '9000000000000000000' AS x UNION ALL SELECT '1')`, int64(9000000000000000001)},
 		{"экспонента в тексте", `SELECT sum(x) FROM (SELECT '1e2' AS x UNION ALL SELECT '0.5')`, float64(100.5)},
+		{"огромный порядок в тексте", `SELECT sum(x) FROM (SELECT '1e1000000000' AS x UNION ALL SELECT '1')`, math.Inf(1)},
+		{"огромный порядок в числовом префиксе", `SELECT sum(x) FROM (SELECT '1e1000000000x' AS x UNION ALL SELECT '1')`, math.Inf(1)},
+		{"очень малый порядок в тексте", `SELECT sum(x) FROM (SELECT '1e-1000000000' AS x UNION ALL SELECT '1')`, float64(1)},
 		{"пробелы вокруг числа", `SELECT sum(x) FROM (SELECT ' 0.1 ' AS x UNION ALL SELECT '0.2')`, float64(0.3)},
 		{"переполнение фиксированной точки", `SELECT sum(x) FROM (SELECT '9000000000000.000001' AS x UNION ALL SELECT '9000000000000.000001')`, float64(18000000000000.000002)},
 	}
