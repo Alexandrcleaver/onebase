@@ -523,7 +523,7 @@ func managedFormSchema() map[string]any {
 		"required":             []string{"field", "op"},
 		"properties": map[string]any{
 			"field": stringSchema("Реквизит выбираемого справочника или служебное поле is_folder"),
-			"op":    enumSchema("eq", "in_hierarchy"),
+			"op":    enumSchema("eq", "eq_or_empty", "in_hierarchy"),
 			"from":  stringSchema("Источник Объект.<Реквизит> или Форма.<Реквизит>"),
 			"value": boolSchema("Булев литерал; в v1 допустим только для is_folder"),
 		},
