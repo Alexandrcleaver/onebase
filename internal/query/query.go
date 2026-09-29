@@ -1370,6 +1370,21 @@ func (tr *translator) findAccountRegister(name string) *metadata.AccountRegister
 	return nil
 }
 
+// accountChartCond ограничивает счета _accounts планом счетов регистра. В
+// _accounts лежат счета всех планов конфигурации, и коды в разных планах
+// совпадают: без условия счёт «41» второго плана давал вторую строку остатков и
+// оборотов с теми же суммами, а счета чужого плана попадали в выборку с нулём.
+// storage.AccountBalances/AccountTurnovers фильтруют по плану так же.
+//
+// Аргумент добавляется в момент вызова, поэтому вызывать функцию нужно там, где
+// условие встаёт в текст SQL: плейсхолдеры SQLite анонимные, и порядок
+// аргументов обязан совпасть с порядком их появления.
+func (tr *translator) accountChartCond(ar *metadata.AccountRegister, alias string) string {
+	d := dialectOrDefault(tr.opts.Dialect)
+	tr.args = append(tr.args, ar.Accounts)
+	return alias + ".plan = " + d.Placeholder(len(tr.args))
+}
+
 // translateAccountFilter переводит токены фильтра виртуальной таблицы регистра
 // бухгалтерии, временно регистрируя в colMap разрешение имён, специфичных для ВТ:
 // «Счёт» → a.code и «СубконтоN» / «<ИмяСубконто>» → r.субконтоN. Изменения
@@ -1527,9 +1542,11 @@ func (tr *translator) genAccountBalances(ar *metadata.AccountRegister, args [][]
 		sb.WriteString(" AND ")
 		sb.WriteString(s)
 	}
+	sb.WriteString(" WHERE ")
+	sb.WriteString(tr.accountChartCond(ar, "a"))
 	if len(args) > 1 && len(args[1]) > 0 {
 		if s := tr.translateAccountFilter(ar, args[1]); s != "" {
-			sb.WriteString(" WHERE (")
+			sb.WriteString(" AND (")
 			sb.WriteString(s)
 			sb.WriteString(")")
 		}
@@ -1575,7 +1592,7 @@ func (tr *translator) genAccountBalancesFromTotals(ar *metadata.AccountRegister)
 		selectList += ", " + strings.Join(resCols, ", ")
 	}
 	sql := "SELECT " + selectList + " FROM _accounts a LEFT JOIN " + totals +
-		" t ON t.счёт = a.code GROUP BY a.code, a.name"
+		" t ON t.счёт = a.code WHERE " + tr.accountChartCond(ar, "a") + " GROUP BY a.code, a.name"
 	if len(subGroup) > 0 {
 		sql += ", " + strings.Join(subGroup, ", ")
 	}
@@ -1665,7 +1682,9 @@ func (tr *translator) genAccountBalancesFromTotalsAtMoment(ar *metadata.AccountR
 			", COALESCE(SUM(u." + cc + "),0) AS " + cc +
 			", COALESCE(SUM(u." + dc + " - u." + cc + "),0) AS " + col + "остаток"
 	}
-	sql := "SELECT " + outer + " FROM _accounts a LEFT JOIN (" + inner + ") u ON u.счёт = a.code GROUP BY a.code, a.name"
+	// Аргументы inner уже добавлены выше: условие на план стоит в тексте после него.
+	sql := "SELECT " + outer + " FROM _accounts a LEFT JOIN (" + inner + ") u ON u.счёт = a.code WHERE " +
+		tr.accountChartCond(ar, "a") + " GROUP BY a.code, a.name"
 	if len(groupSub) > 0 {
 		sql += ", " + strings.Join(groupSub, ", ")
 	}
@@ -1786,7 +1805,9 @@ func (tr *translator) accountTurnoversOuter(ar *metadata.AccountRegister, subCol
 		out += ", COALESCE(SUM(u." + col + "_дт),0) AS " + col + "_дт" +
 			", COALESCE(SUM(u." + col + "_кт),0) AS " + col + "_кт"
 	}
-	sql := "SELECT " + out + " FROM (" + inner + ") u JOIN _accounts a ON a.code = u.счёт GROUP BY u.счёт, a.name"
+	// Аргументы inner добавлены до вызова: условие на план стоит в тексте после него.
+	sql := "SELECT " + out + " FROM (" + inner + ") u JOIN _accounts a ON a.code = u.счёт AND " +
+		tr.accountChartCond(ar, "a") + " GROUP BY u.счёт, a.name"
 	if len(groupSub) > 0 {
 		sql += ", " + strings.Join(groupSub, ", ")
 	}
@@ -1855,9 +1876,11 @@ func (tr *translator) genAccountTurnovers(ar *metadata.AccountRegister, args [][
 		sb.WriteString(" AND ")
 		sb.WriteString(s)
 	}
+	sb.WriteString(" WHERE ")
+	sb.WriteString(tr.accountChartCond(ar, "a"))
 	if len(args) > 2 && len(args[2]) > 0 {
 		if s := tr.translateAccountFilter(ar, args[2]); s != "" {
-			sb.WriteString(" WHERE (")
+			sb.WriteString(" AND (")
 			sb.WriteString(s)
 			sb.WriteString(")")
 		}
