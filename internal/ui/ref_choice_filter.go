@@ -351,14 +351,19 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 }
 
 func (s *Server) choiceSelectedAllowed(ctx context.Context, target *metadata.Entity, id uuid.UUID, predicates []storage.ChoicePredicate) (bool, error) {
-	params := s.refListParamsForMode(target, refOptionsChoice)
-	params.ChoicePredicates = predicates
+	return s.choiceSelectedAllowedWithParams(ctx, target, id, storage.ListParams{ChoicePredicates: predicates})
+}
+
+func (s *Server) choiceSelectedAllowedWithParams(ctx context.Context, target *metadata.Entity, id uuid.UUID, params storage.ListParams) (bool, error) {
+	base := s.refListParamsForMode(target, refOptionsChoice)
+	base.Filters = params.Filters
+	base.ChoicePredicates = params.ChoicePredicates
 	var err error
-	params, err = s.rowFilterFor(ctx, target, "read", params)
+	base, err = s.rowFilterFor(ctx, target, "read", base)
 	if err != nil {
 		return false, err
 	}
-	return s.store.ListContainsID(ctx, target.Name, target, id, params)
+	return s.store.ListContainsID(ctx, target.Name, target, id, base)
 }
 
 func formValueForPath(values any, path string) string {
@@ -397,17 +402,18 @@ func markOutsideChoice(rows []map[string]any, selected string) {
 	}
 }
 
-func (s *Server) initialChoiceOptions(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, target *metadata.Entity, element *metadata.FormElement, sources map[string]string, selected string) ([]map[string]any, error) {
+// Оба ограничения складываются здесь: подчинение справочника (owner) даёт
+// params, условия choice_filter — predicates. Значение глубокого источника
+// читает сервер, поэтому нужны owner-сущность и форма.
+func (s *Server) initialChoiceOptions(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, target *metadata.Entity, element *metadata.FormElement, sources map[string]string, selected, ownerID string, ownerAsked bool) ([]map[string]any, error) {
 	predicates, empty, err := s.choicePredicates(ctx, owner, form, element, sources)
 	if err != nil {
 		return nil, err
 	}
 	var rows []map[string]any
-	if !empty {
-		rows, err = s.referenceOptionsWithParams(ctx, target, refOptionsChoice, storage.ListParams{
-			Limit:            refPickerDefaultLimit,
-			ChoicePredicates: predicates,
-		})
+	params, ownerOK := ownerFilterParams(target, ownerID, ownerAsked, storage.ListParams{Limit: refPickerDefaultLimit, ChoicePredicates: predicates})
+	if !empty && ownerOK {
+		rows, err = s.referenceOptionsWithParams(ctx, target, refOptionsChoice, params)
 		if err != nil {
 			return nil, err
 		}
@@ -417,9 +423,9 @@ func (s *Server) initialChoiceOptions(ctx context.Context, owner *metadata.Entit
 		return rows, nil
 	}
 	allowed := false
-	if !empty {
+	if !empty && ownerOK {
 		if id, parseErr := uuid.Parse(selected); parseErr == nil && id != uuid.Nil {
-			allowed, err = s.choiceSelectedAllowed(ctx, target, id, predicates)
+			allowed, err = s.choiceSelectedAllowedWithParams(ctx, target, id, params)
 			if err != nil {
 				return nil, err
 			}
@@ -456,7 +462,11 @@ func (s *Server) applyManagedChoiceFilters(ctx context.Context, owner *metadata.
 			sources[path] = formValueForPath(data["Values"], path)
 		}
 		selected := formValueForPath(data["Values"], element.DataPath)
-		rows, err := s.initialChoiceOptions(ctx, owner, form, target, element, sources, selected)
+		ownerID, ownerAsked := "", false
+		if hf, ok := ownerHolderField(owner, target.Owner); ok {
+			ownerID, ownerAsked = formValueForPath(data["Values"], "Объект."+hf.Name), true
+		}
+		rows, err := s.initialChoiceOptions(ctx, owner, form, target, element, sources, selected, ownerID, ownerAsked)
 		if err == nil {
 			options[element.ID] = rows
 		} else {
