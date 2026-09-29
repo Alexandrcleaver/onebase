@@ -67,6 +67,7 @@ func newDeepChoiceFixture(t *testing.T) deepChoiceFixture {
 		Fields: []metadata.Field{
 			{Name: "Наименование", Type: metadata.FieldTypeString},
 			{Name: "Группа", Type: metadata.FieldType("reference:" + group.Name), RefEntity: group.Name},
+			{Name: "Секретный", Type: metadata.FieldTypeBool},
 		},
 	}
 	form := &metadata.FormModule{
@@ -130,16 +131,17 @@ func newDeepChoiceFixture(t *testing.T) deepChoiceFixture {
 		}
 	}
 	for _, row := range []struct {
-		id    uuid.UUID
-		name  string
-		group uuid.UUID
+		id     uuid.UUID
+		name   string
+		group  uuid.UUID
+		secret bool
 	}{
-		{deepChoiceUUID(0x30, 1), "Не включается", fixture.groupOne},
-		{deepChoiceUUID(0x30, 2), "Течёт", fixture.groupTwo},
-		{deepChoiceUUID(0x30, 3), "Шумит", fixture.groupOne},
+		{deepChoiceUUID(0x30, 1), "Не включается", fixture.groupOne, false},
+		{deepChoiceUUID(0x30, 2), "Течёт", fixture.groupTwo, true},
+		{deepChoiceUUID(0x30, 3), "Шумит", fixture.groupOne, false},
 	} {
 		if err := db.Upsert(ctx, target.Name, row.id, map[string]any{
-			"Наименование": row.name, "Группа": row.group.String(),
+			"Наименование": row.name, "Группа": row.group.String(), "Секретный": row.secret,
 		}, target); err != nil {
 			t.Fatalf("seed fault: %v", err)
 		}
@@ -313,4 +315,35 @@ func TestRefOptionsDeepChoiceSourceReadsIntermediateUnderUserRights(t *testing.T
 			t.Fatalf("необъявленный источник принят: status=%d body=%s", recorder.Code, recorder.Body.String())
 		}
 	})
+}
+
+func TestRefOptionsBooleanLiteralRespectsTargetFieldPolicy(t *testing.T) {
+	f := newDeepChoiceFixture(t)
+	value := false
+	f.owner.Forms[0].Elements[1].ChoiceFilter = []metadata.FormChoiceCondition{{
+		Field: "Секретный", Op: metadata.FormChoiceOpEqual, Value: &value,
+	}}
+	if got := decodeChoiceHTTP(t, f.request(t, deepChoiceUser(nil), map[string]string{})); got.Total != 2 || len(got.Items) != 2 {
+		t.Fatalf("unmasked literal should find two rows: %#v", got)
+	}
+
+	var hiddenResponse string
+	for _, strategy := range []string{"hide", "mask_all"} {
+		user := deepChoiceUser(nil)
+		user.Roles[0].Permissions.FieldAccess.Catalogs = map[string]auth.FieldPolicies{
+			f.target.Name: {"Секретный": {Read: strategy}},
+		}
+		response := f.request(t, user, map[string]string{})
+		if response.Code != http.StatusOK {
+			t.Fatalf("policy %s: status=%d body=%s", strategy, response.Code, response.Body.String())
+		}
+		got := decodeChoiceHTTP(t, response)
+		if got.Total != 0 || len(got.Items) != 0 {
+			t.Fatalf("policy %s leaked the boolean via choice results: %#v", strategy, got)
+		}
+		if hiddenResponse != "" && response.Body.String() != hiddenResponse {
+			t.Fatalf("hide and mask_all returned distinguishable results: %q vs %q", hiddenResponse, response.Body.String())
+		}
+		hiddenResponse = response.Body.String()
+	}
 }

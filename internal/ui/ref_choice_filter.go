@@ -131,9 +131,12 @@ func choiceSourceControls(element *metadata.FormElement) map[string]string {
 // unknown source names and malformed UUIDs are request errors. Значение
 // глубокого источника сервер читает сам: из браузера приходит только ссылка
 // ведущего поля.
-func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, element *metadata.FormElement, sources map[string]string) ([]storage.ChoicePredicate, bool, error) {
+func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, target *metadata.Entity, element *metadata.FormElement, sources map[string]string) ([]storage.ChoicePredicate, bool, error) {
 	if element == nil || len(element.ChoiceFilter) == 0 {
 		return nil, false, fmt.Errorf("choice_filter is not declared")
+	}
+	if target == nil {
+		return nil, false, fmt.Errorf("choice target is unknown")
 	}
 	allowed := choiceSourceControls(element)
 	for path := range sources {
@@ -143,7 +146,13 @@ func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, f
 	}
 
 	predicates := make([]storage.ChoicePredicate, 0, len(element.ChoiceFilter))
+	targetDecisions := s.fieldDecisions(ctx, target)
 	for _, condition := range element.ChoiceFilter {
+		// The filtered result and its total reveal a target field even when the
+		// field itself is hidden from the response. Keep mask and hide identical.
+		if choiceAttrMasked(targetDecisions, condition.Field) {
+			return nil, true, nil
+		}
 		predicate := storage.ChoicePredicate{Field: condition.Field, Op: condition.Op}
 		if condition.Value != nil {
 			predicate.Value = *condition.Value
@@ -219,7 +228,7 @@ func (s *Server) deepChoiceSourceValue(ctx context.Context, owner *metadata.Enti
 	return target, true, nil
 }
 
-// choiceAttrMasked — закрыт ли реквизит посредника полевой политикой. Ключи
+// choiceAttrMasked — закрыт ли реквизит полевой политикой. Ключи
 // решений канонизированы по метаданным, но сверка без учёта регистра дешевле
 // предположения: незамеченная маска означала бы отбор по значению, которого
 // пользователю видеть нельзя.
@@ -334,7 +343,7 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 	if err != nil {
 		return nil, err
 	}
-	predicates, empty, err := s.choicePredicates(r.Context(), owner, form, element, sources)
+	predicates, empty, err := s.choicePredicates(r.Context(), owner, form, target, element, sources)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +407,7 @@ func markOutsideChoice(rows []map[string]any, selected string) {
 }
 
 func (s *Server) initialChoiceOptions(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, target *metadata.Entity, element *metadata.FormElement, sources map[string]string, selected string) ([]map[string]any, error) {
-	predicates, empty, err := s.choicePredicates(ctx, owner, form, element, sources)
+	predicates, empty, err := s.choicePredicates(ctx, owner, form, target, element, sources)
 	if err != nil {
 		return nil, err
 	}
