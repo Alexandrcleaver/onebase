@@ -2597,6 +2597,43 @@ func buildRefDimInfosWithEntities(dims []metadata.Field, entities []*metadata.En
 	return result
 }
 
+// refAttrColumnForPrevQualifier подбирает КОЛОНКУ реквизита у сущности,
+// присоединённой по ссылке: «Инициатор.УчётнаяЗапись» — это колонка
+// «учётнаязапись_id», а не «учётнаязапись». Ссылочный реквизит хранится с
+// суффиксом _id, и без подстановки запрос падал сырым «no such column» — только
+// на реквизитах-ссылках, поэтому выглядело как опечатка в конфигурации (#1784).
+//
+// pos — позиция реквизита; квалификатор берётся прямо перед точкой. Пустая
+// строка — «ничего не знаем», вызывающий оставляет имя как есть.
+func (tr *translator) refAttrColumnForPrevQualifier(pos int, attr string) string {
+	if pos < 2 || pos >= len(tr.tokens) {
+		return ""
+	}
+	if tr.tokens[pos-1].kind != tDot || tr.tokens[pos-2].kind != tIdent {
+		return ""
+	}
+	return tr.refAttrColumn(lowerFast(tr.tokens[pos-2].val), attr)
+}
+
+func (tr *translator) refAttrColumn(qualifier, attr string) string {
+	rd := tr.findRefDim(qualifier)
+	if rd == nil || rd.refEntity == "" {
+		return ""
+	}
+	for _, ent := range tr.opts.Entities {
+		if !strings.EqualFold(ent.Name, rd.refEntity) {
+			continue
+		}
+		for _, f := range ent.Fields {
+			if strings.EqualFold(f.Name, attr) {
+				return metadata.ColumnName(f)
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
 func (tr *translator) findRefDim(name string) *refDimInfo {
 	for i := range tr.refDims {
 		if tr.refDims[i].fieldName == name {
@@ -4598,6 +4635,8 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 						}
 					} else if c, ok2 := tr.colMap[lower]; ok2 {
 						tr.emitQualifiedColumn(c, lower)
+					} else if col := tr.refAttrColumnForPrevQualifier(tr.pos-1, lower); col != "" {
+						tr.emitQualifiedColumn(col, lower)
 					} else {
 						tr.emitQualifiedColumn(lower, lower)
 					}
