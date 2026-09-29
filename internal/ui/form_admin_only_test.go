@@ -192,3 +192,51 @@ func TestEditableAdminOnlyStaysLockedAfterFormEvent(t *testing.T) {
 		t.Fatalf("администратору поле заперлось: %s", adminRecorder.Body.String())
 	}
 }
+
+func TestEditableAdminOnlyRejectsForgedValueBeforeFormEventWrite(t *testing.T) {
+	srv, ent, id := adminOnlyFixture(t)
+	ent.Forms[0].ProgramAST = mustParse(t, `
+Процедура Пусто()
+    Объект.Записать();
+КонецПроцедуры`)
+	body := url.Values{
+		"_element": {"Кн"}, "_event": {string(metadata.FormEventOnClick)},
+		"_kind": {"object"}, "_id": {id.String()},
+		"Наименование": {"звонок"}, "ТипЗвонка": {"Подделка"},
+		"Комментарий": {"из события"},
+	}
+	rec := runFormEventAs(t, srv, ent, body, adminOnlyOperator(ent.Name))
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"ok":false`) {
+		t.Fatalf("событие не прошло: %d %s", rec.Code, rec.Body.String())
+	}
+	row, err := srv.store.GetByID(t.Context(), ent.Name, id, ent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(row["ТипЗвонка"]); got != "Входящий" {
+		t.Fatalf("обработчик записал подделанное значение: %q", got)
+	}
+	if got := fmt.Sprint(row["Комментарий"]); got != "из события" {
+		t.Fatalf("обычное поле не записалось: %q", got)
+	}
+}
+
+func TestEditableAdminOnlyRejectsForgedValueOnCloseIntent(t *testing.T) {
+	srv, ent, id := adminOnlyFixture(t)
+	body := closeIntentBody(uuid.NewString(), "ok", "звонок")
+	body.Set("_close_mode", "save")
+	body.Set("_id", id.String())
+	body.Set("ТипЗвонка", "Подделка")
+	body.Set("Комментарий", "при закрытии")
+	rec := executeFormCloseIntentAsUser(t, srv, ent, body, adminOnlyOperator(ent.Name))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("закрытие не прошло: %d %s", rec.Code, rec.Body.String())
+	}
+	row, err := srv.store.GetByID(t.Context(), ent.Name, id, ent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(row["ТипЗвонка"]); got != "Входящий" {
+		t.Fatalf("закрытие записало подделанное значение: %q", got)
+	}
+}

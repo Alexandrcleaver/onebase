@@ -115,6 +115,9 @@ func TestChoiceDropdownFalseLeavesOnlyCurrentValue(t *testing.T) {
 	if strings.Contains(html, "Филиал Б") || strings.Contains(html, "Филиал В") {
 		t.Error("choice_dropdown: false не свернул предзагруженную страницу вариантов")
 	}
+	if !strings.Contains(html, `data-ref-choice-dropdown="false"`) {
+		t.Error("список не передал JS признак choice_dropdown: false")
+	}
 	// Выбор уходит в форму подбора, значит кнопка подбора обязана остаться.
 	if !strings.Contains(html, `data-ob-ref-picker="ref-Филиал"`) {
 		t.Error("кнопка подбора пропала — выбирать значение стало нечем")

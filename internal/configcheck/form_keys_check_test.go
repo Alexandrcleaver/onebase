@@ -63,6 +63,10 @@ func TestCheckFormAdminOnlyRejectsUnenforceablePlacement(t *testing.T) {
 		{"элемент без data_path", &metadata.FormElement{
 			Kind: metadata.FormElementField, Name: "ПолеБезПути", EditableAdminOnly: true,
 		}, "data_path"},
+		{"реквизит формы", &metadata.FormElement{
+			Kind: metadata.FormElementField, Name: "ПолеЗаметка",
+			DataPath: "Форма.Заметка", EditableAdminOnly: true,
+		}, "Объект.<Реквизит>"},
 		{"не поле ввода", &metadata.FormElement{
 			Kind: metadata.FormElementButton, Name: "КнОК", EditableAdminOnly: true,
 		}, "только у kind"},

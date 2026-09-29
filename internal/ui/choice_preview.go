@@ -249,7 +249,8 @@ func (s *Server) choicePreviewPage(w http.ResponseWriter, r *http.Request, ent *
 
 	// Страница — тем же путём, что и обычный подбор: object read → row filter →
 	// field mask → _label (инварианты 2 и 11). Только затем вызывается функция.
-	items, total, err := s.referenceOptionsPageWithParams(r.Context(), ent, body.Q, limit, body.Offset, storage.ListParams{})
+	items, total, err := s.referenceOptionsPageWithParams(r.Context(), ent, body.Q, limit, body.Offset,
+		storage.ListParams{IncludeFolders: element.ChoiceFolders})
 	if err != nil {
 		s.serverError(w, r, err)
 		return

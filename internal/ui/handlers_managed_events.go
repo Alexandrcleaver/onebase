@@ -770,6 +770,23 @@ func (s *Server) handleManagedFormEventMode(w http.ResponseWriter, r *http.Reque
 		respondJSON(enc, formEventResponse{Error: err.Error()})
 		return
 	}
+	// Событие может вызвать Объект.Записать() до обычного submit. Удаляем
+	// присланные значения запертых полей из объекта и POST: последующее
+	// restoreUnsubmittedFields восстановит каноничное значение из БД.
+	if !s.isAdmin(r) {
+		for _, name := range dropAdminOnlyFields(form, obj.Fields, false) {
+			for key := range r.Form {
+				if strings.EqualFold(key, name) {
+					delete(r.Form, key)
+				}
+			}
+			for key := range r.PostForm {
+				if strings.EqualFold(key, name) {
+					delete(r.PostForm, key)
+				}
+			}
+		}
+	}
 
 	// Дочитать поля, которых нет на форме (или которые пришли disabled), из БД —
 	// тем же правилом, что и при сохранении. Без этого обработчик видит nil у

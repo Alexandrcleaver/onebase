@@ -20,7 +20,7 @@ function response(data) {
   return {ok: true, status: 200, json: async () => data};
 }
 
-function runtime(fetchImpl, selected) {
+function runtime(fetchImpl, selected, collapsed = false) {
   const listeners = {};
   const sourceControl = {value: 'warehouse-a'};
   const attrs = {
@@ -32,6 +32,7 @@ function runtime(fetchImpl, selected) {
     }),
     'data-ref-entity': 'МестоХранения',
   };
+  if (collapsed) attrs['data-ref-choice-dropdown'] = 'false';
   const select = {
     options: [
       {value: '', textContent: '— выбрать —'},
@@ -144,4 +145,15 @@ test('network failure is visible and preserves the previously filtered options a
   assert.deepEqual(env.select.options.map((option) => [option.value, option.textContent]), before);
   assert.equal(env.attrs['data-ob-choice-error'], '1');
   assert.equal(env.attrs['data-ob-choice-loading'], undefined);
+});
+
+test('choice_dropdown false keeps only the selected option after a source refresh', async () => {
+  const env = runtime(async () => response({
+    items: [{id: 'legacy-location', _label: 'Saved'}, {id: 'other-location', _label: 'Other'}],
+    total: 2, selected_allowed: true,
+  }), 'legacy-location', true);
+  env.sourceControl.value = 'warehouse-b';
+  await env.api.obRefreshChoiceSelect(env.select, false);
+  assert.deepEqual(env.select.options.map((option) => option.value), ['', 'legacy-location']);
+  assert.equal(env.select.value, 'legacy-location');
 });

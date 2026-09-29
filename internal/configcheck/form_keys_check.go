@@ -15,7 +15,7 @@ import (
 // в неподходящем месте лишь бесполезны и остаются предупреждением.
 
 // CheckFormAdminOnly — editable_admin_only живёт только на элементе-поле с
-// двухсегментным data_path. Именно такое поле сервер отбрасывает из присланной
+// двухсегментным data_path Объект.<Реквизит>. Именно такое поле сервер отбрасывает из присланной
 // записи; на колонке табличной части или на элементе без data_path запрет
 // нарисовался бы, но не действовал.
 func CheckFormAdminOnly(proj *project.Project) []Issue {
@@ -36,7 +36,7 @@ func CheckFormAdminOnly(proj *project.Project) []Issue {
 			}
 			if !isTwoSegmentDataPath(el.DataPath) {
 				issues = append(issues, formKeyIssue(owner, form, el, "form.admin-only",
-					fmt.Sprintf("editable_admin_only требует data_path вида Объект.<Реквизит> или Форма.<Реквизит>, а задан %q", el.DataPath),
+					fmt.Sprintf("editable_admin_only требует data_path вида Объект.<Реквизит>, а задан %q", el.DataPath),
 					"Колонку табличной части и элемент без data_path сервер не запирает — запрет был бы только в разметке."))
 			}
 		})
@@ -125,7 +125,8 @@ func forEachProjectForm(proj *project.Project, fn func(owner *metadata.Entity, f
 }
 
 // isTwoSegmentDataPath — путь ровно из двух непустых сегментов с известным
-// корнем. Колонка табличной части («Объект.Строки.Цена») сюда не попадает.
+// корнем Объект. Колонка табличной части («Объект.Строки.Цена»)
+// и реквизит формы сюда не попадают.
 func isTwoSegmentDataPath(path string) bool {
 	parts := strings.Split(strings.TrimSpace(path), ".")
 	if len(parts) != 2 {
@@ -135,5 +136,5 @@ func isTwoSegmentDataPath(path string) bool {
 	if name == "" {
 		return false
 	}
-	return strings.EqualFold(root, "Объект") || strings.EqualFold(root, "Форма")
+	return strings.EqualFold(root, "Объект")
 }

@@ -3919,9 +3919,11 @@ function obChoiceApplyResponse(sel, data, selectedAtRequest) {
   sel.appendChild(blank);
 
   var selectedPresent = false;
+  var collapsed = sel.getAttribute('data-ref-choice-dropdown') === 'false';
   rows.forEach(function (row) {
     var id = row && row.id != null ? String(row.id) : '';
     if (!id) return;
+    if (collapsed && (id !== selectedAtRequest || selectedAllowed === false)) return;
     var opt = document.createElement('option');
     opt.value = id;
     opt.textContent = String((row && row._label) || id);

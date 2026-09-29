@@ -438,6 +438,9 @@ func templateFuncs(bundle *i18n.Bundle) template.FuncMap {
 			}
 			return rows
 		},
+		"choiceDropdownCollapsed": func(element *metadata.FormElement) bool {
+			return element != nil && element.ChoiceDropdown != nil && !*element.ChoiceDropdown
+		},
 		// adminOnlyLocked — поле заперто, потому что смотрит не администратор.
 		// Тот же запрет входит в ответы событий формы и в разбор записи: иначе
 		// ложное readonly_when разблокировало бы поле после первого round trip.
