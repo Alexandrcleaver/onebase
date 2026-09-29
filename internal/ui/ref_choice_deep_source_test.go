@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -16,6 +17,7 @@ import (
 	"github.com/ivantit66/onebase/internal/metadata"
 	"github.com/ivantit66/onebase/internal/runtime"
 	"github.com/ivantit66/onebase/internal/storage"
+	"golang.org/x/net/html"
 )
 
 // Глубокий источник (план 183, срез B1) проверяется через публичный маршрут
@@ -32,6 +34,7 @@ type deepChoiceFixture struct {
 	directionB uuid.UUID
 	directionC uuid.UUID
 	directionD uuid.UUID
+	ownerID    uuid.UUID
 }
 
 func deepChoiceUUID(prefix byte, number int) uuid.UUID {
@@ -98,6 +101,7 @@ func newDeepChoiceFixture(t *testing.T) deepChoiceFixture {
 		groupOne: deepChoiceUUID(0x10, 1), groupTwo: deepChoiceUUID(0x10, 2),
 		directionA: deepChoiceUUID(0x20, 1), directionB: deepChoiceUUID(0x20, 2),
 		directionC: deepChoiceUUID(0x20, 3), directionD: deepChoiceUUID(0x20, 4),
+		ownerID: deepChoiceUUID(0x40, 1),
 	}
 
 	for _, row := range []struct {
@@ -140,12 +144,51 @@ func newDeepChoiceFixture(t *testing.T) deepChoiceFixture {
 			t.Fatalf("seed fault: %v", err)
 		}
 	}
+	if err := db.Upsert(ctx, owner.Name, fixture.ownerID, map[string]any{
+		"Направление": fixture.directionA.String(),
+	}, owner); err != nil {
+		t.Fatalf("seed owner: %v", err)
+	}
 
 	reg := runtime.NewRegistry()
 	reg.Load(runtime.LoadOptions{Entities: entities})
 	fixture.server = &Server{reg: reg, store: db}
 	fixture.server.entitySvc = fixture.server.newEntityService(nil)
 	return fixture
+}
+
+func TestManagedDeepChoiceInitialRenderUsesSavedDirection(t *testing.T) {
+	f := newDeepChoiceFixture(t)
+	router := chi.NewRouter()
+	f.server.Mount(router)
+	request := httptest.NewRequest(http.MethodGet,
+		"/ui/document/"+url.PathEscape(f.owner.Name)+"/"+f.ownerID.String(), nil)
+	request = request.WithContext(auth.ContextWithUser(request.Context(), deepChoiceUser(nil)))
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("form status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	document, err := html.Parse(strings.NewReader(recorder.Body.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectNode := findSelectByName(document, f.target.Name)
+	if selectNode == nil {
+		t.Fatalf("managed reference select %q not found", f.target.Name)
+	}
+	options := make(map[string]bool)
+	for option := selectNode.FirstChild; option != nil; option = option.NextSibling {
+		if option.Type != html.ElementNode || option.Data != "option" {
+			continue
+		}
+		if value, ok := htmlAttribute(option, "value"); ok && value != "" {
+			options[value] = true
+		}
+	}
+	if len(options) != 2 || !options[deepChoiceUUID(0x30, 1).String()] || !options[deepChoiceUUID(0x30, 3).String()] {
+		t.Fatalf("initial deep choice options = %v, want only group 1", options)
+	}
 }
 
 // deepChoiceUser — оператор: читает все три справочника, но видит только свои

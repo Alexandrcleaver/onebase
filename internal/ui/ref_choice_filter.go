@@ -453,7 +453,12 @@ func (s *Server) applyManagedChoiceFilters(ctx context.Context, owner *metadata.
 		controls := choiceSourceControls(element)
 		sources := make(map[string]string, len(controls))
 		for path := range controls {
-			sources[path] = formValueForPath(data["Values"], path)
+			source, ok := metadata.ParseFormChoiceSource(path)
+			if !ok {
+				continue
+			}
+			// The form holds the leading reference, not the attribute behind it.
+			sources[path] = formValueForPath(data["Values"], source.Root+"."+source.Field)
 		}
 		selected := formValueForPath(data["Values"], element.DataPath)
 		rows, err := s.initialChoiceOptions(ctx, owner, form, target, element, sources, selected)
