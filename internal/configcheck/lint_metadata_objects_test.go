@@ -141,3 +141,31 @@ elements: []
 КонецПроцедуры
 `)
 }
+
+// Хуки удаления объекта (ПередУдалением, ПослеУдаления) вызывает
+// entityservice.Delete, но в списке точек входа проверки их не было: каждая
+// конфигурация, закрывающая удаление в закрытом периоде, получала
+// «процедура не достижима» на каждом документе.
+func TestLintDeleteHooksAreEntryPoints(t *testing.T) {
+	dir := t.TempDir()
+	mkFile(t, filepath.Join(dir, "documents", "приход.yaml"), `name: Приход
+posting: true
+fields:
+  - {name: Дата, type: date}
+`)
+	mkFile(t, filepath.Join(dir, "src", "приход.posting.os"), `Процедура ОбработкаПроведения()
+КонецПроцедуры
+
+Процедура ПередУдалением()
+КонецПроцедуры
+
+Процедура ПослеУдаления()
+КонецПроцедуры
+`)
+	res := RunFullWithOptions(dir, Options{Lint: true})
+	for _, w := range res.Warnings {
+		if w.Code == "dsl.dead-procedure" {
+			t.Errorf("хук удаления объявлен мёртвым: %+v", w)
+		}
+	}
+}

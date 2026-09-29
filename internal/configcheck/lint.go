@@ -1232,6 +1232,10 @@ func collectLintPrograms(dir string, proj *project.Project) []lintProgram {
 				"OnUnpost", "ОбработкаУдаленияПроведения",
 				"OnFill", "ОбработкаЗаполнения",
 				"OnCreate", "ПриСозданииНового",
+				// Хуки удаления вызывает entityservice.Delete; без них в списке
+				// корней ПередУдалением объявлялась мёртвой процедурой.
+				"BeforeDelete", "ПередУдалением",
+				"AfterDelete", "ПослеУдаления",
 				"Печать", "Print",
 			), false)
 		default:
