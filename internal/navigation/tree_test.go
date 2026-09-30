@@ -207,3 +207,21 @@ func TestNormalizeLimitsAndIconNames(t *testing.T) {
 	}
 	t.Fatal("menu size limit missing")
 }
+
+func TestResolverTranslationOnlyOverrideKeepsDefaultRegisterView(t *testing.T) {
+	menu := &metadata.Menu{Sections: []metadata.MenuSection{{ID: "section", Title: "Title", Items: []metadata.MenuItem{
+		{ID: "balances", Target: "register:Attendance:balances", Titles: map[string]string{"en": "Available"}},
+	}}}}
+	tree, diags := navigation.Normalize("sub", menu, navigation.NewScope(schoolObjects(), schoolContents(), false))
+	if len(diags) != 0 {
+		t.Fatal(diags)
+	}
+	item := tree.Sections[0].Items[0]
+	translate := func(s string) string { return s }
+	if got := navigation.ResolveItem(item, "ru", "global", translate, false).Label; got != "Посещаемость (остатки)" {
+		t.Fatalf("default register view lost: %s", got)
+	}
+	if got := navigation.ResolveItem(item, "en", "global", translate, false).Label; got != "Available" {
+		t.Fatalf("override lost: %s", got)
+	}
+}

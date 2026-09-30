@@ -75,7 +75,7 @@ func NewScope(objects []Object, contents *metadata.SubsystemContents, global boo
 		for _, o := range ordered {
 			o = cloneObject(o)
 			scope.objects[o.Target.key()] = o
-			section.Items = append(section.Items, Item{ID: targetID(o.Target), Target: o.Target.String(), Title: o.Title, Titles: copyTitles(o.Titles), Object: o, UseObjectTitle: true})
+			section.Items = append(section.Items, Item{ID: targetID(o.Target), Target: o.Target.String(), Object: o})
 		}
 		if len(section.Items) > 0 {
 			scope.Sections = append(scope.Sections, section)

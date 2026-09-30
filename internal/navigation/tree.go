@@ -58,7 +58,7 @@ type ResolvedItem struct {
 // The caller must filter that request with current RBAC before showing the URL.
 func ResolveItem(item Item, lang, context string, translate func(string) string, flat bool) ResolvedItem {
 	label := DisplayTitle(item.Title, item.Titles, lang)
-	if item.UseObjectTitle {
+	if label == "" {
 		label = item.Object.Label(lang, translate, flat)
 	}
 	t := item.Object.Target
@@ -96,13 +96,12 @@ type Group struct {
 }
 
 type Item struct {
-	ID             string            `json:"id"`
-	Target         string            `json:"target"`
-	Title          string            `json:"title"`
-	Titles         map[string]string `json:"titles,omitempty"`
-	Icon           string            `json:"icon,omitempty"`
-	Object         Object            `json:"object"`
-	UseObjectTitle bool              `json:"use_object_title"`
+	ID     string            `json:"id"`
+	Target string            `json:"target"`
+	Title  string            `json:"title"`
+	Titles map[string]string `json:"titles,omitempty"`
+	Icon   string            `json:"icon,omitempty"`
+	Object Object            `json:"object"`
 }
 
 type Diagnostic struct {
@@ -162,16 +161,8 @@ func Normalize(context string, menu *metadata.Menu, scope Scope) (Tree, []Diagno
 				add("navigation.duplicate-target", item.ID, "повтор target в одном родителе: "+item.Target, true)
 			}
 			seen[target.key()], placed[target.key()] = true, true
-			title := item.Title
-			if title == "" {
-				title = object.Title
-			}
-			titles := copyTitles(item.Titles)
-			if item.Title == "" && len(item.Titles) == 0 {
-				titles = copyTitles(object.Titles)
-			}
-			output = append(output, Item{ID: "cfg:" + item.ID, Target: object.Target.String(), Title: title,
-				Titles: titles, Icon: metadata.NormalizeIconName(item.Icon), Object: cloneObject(object), UseObjectTitle: item.Title == "" && len(item.Titles) == 0})
+			output = append(output, Item{ID: "cfg:" + item.ID, Target: object.Target.String(), Title: item.Title,
+				Titles: copyTitles(item.Titles), Icon: metadata.NormalizeIconName(item.Icon), Object: cloneObject(object)})
 		}
 		return output
 	}
