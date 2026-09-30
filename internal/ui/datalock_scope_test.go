@@ -82,7 +82,7 @@ func dlServer(t *testing.T) (*Server, *runtime.Registry) {
 	}
 	write := func(rel, text string) {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, rel), []byte(text), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(text), 0o644); err != nil { //nolint:gosec // G703: rel — имена из констант теста, dir — t.TempDir()
 			t.Fatal(err)
 		}
 	}
