@@ -34,14 +34,25 @@ func (db *DB) UnpostedRecorderMovements(ctx context.Context, registers []*metada
 	d := db.dialect
 	docs := postingDocumentTables(entities)
 	var stats []UnpostedStat
-	for _, src := range append(db.accumSources(ctx, registers), db.accountSources(ctx, accountRegisters)...) {
+	sources, err := db.unpostedMovementSources(ctx, registers, accountRegisters)
+	if err != nil {
+		return nil, err
+	}
+	for _, src := range sources {
 		types, err := db.movementRecorderTypes(ctx, src)
 		if err != nil {
 			return nil, err
 		}
 		for _, recType := range types {
 			tbl, ok := docs[strings.ToLower(recType)]
-			if !ok || !db.HasTable(ctx, tbl) {
+			if !ok {
+				continue
+			}
+			exists, err := db.TableExists(ctx, tbl)
+			if err != nil {
+				return nil, err
+			}
+			if !exists {
 				continue
 			}
 			var count int
@@ -71,14 +82,25 @@ func (db *DB) DeleteUnpostedRecorderMovementsAndRecalcTotals(ctx context.Context
 	return db.deleteMovementFamiliesAndRecalcTotals(ctx, registers, accountRegisters,
 		func(txCtx context.Context) (int64, error) {
 			var total int64
-			for _, src := range append(db.accumSources(txCtx, registers), db.accountSources(txCtx, accountRegisters)...) {
+			sources, err := db.unpostedMovementSources(txCtx, registers, accountRegisters)
+			if err != nil {
+				return 0, err
+			}
+			for _, src := range sources {
 				types, err := db.movementRecorderTypes(txCtx, src)
 				if err != nil {
 					return total, err
 				}
 				for _, recType := range types {
 					tbl, ok := docs[strings.ToLower(recType)]
-					if !ok || !db.HasTable(txCtx, tbl) {
+					if !ok {
+						continue
+					}
+					exists, err := db.TableExists(txCtx, tbl)
+					if err != nil {
+						return total, err
+					}
+					if !exists {
 						continue
 					}
 					ct, err := db.Exec(txCtx, fmt.Sprintf(
@@ -126,4 +148,35 @@ func (db *DB) movementRecorderTypes(ctx context.Context, src movementSource) ([]
 		}
 	}
 	return types, rows.Err()
+}
+
+// unpostedMovementSources skips only genuinely absent tables. The doctor check
+// and fix must propagate schema errors instead of reporting that no work exists.
+func (db *DB) unpostedMovementSources(ctx context.Context, registers []*metadata.Register,
+	accountRegisters []*metadata.AccountRegister,
+) ([]movementSource, error) {
+	sources := make([]movementSource, 0, len(registers)+len(accountRegisters))
+	for _, reg := range registers {
+		sources = append(sources, movementSource{
+			name: reg.Name, table: metadata.RegisterTableName(reg.Name),
+			recorderCol: "recorder", recorderTypeCol: "recorder_type",
+		})
+	}
+	for _, reg := range accountRegisters {
+		sources = append(sources, movementSource{
+			name: reg.Name, table: metadata.AccountRegTableName(reg.Name),
+			recorderCol: "регистратор", recorderTypeCol: "регистратор_тип",
+		})
+	}
+	out := make([]movementSource, 0, len(sources))
+	for _, src := range sources {
+		exists, err := db.TableExists(ctx, src.table)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			out = append(out, src)
+		}
+	}
+	return out, nil
 }
