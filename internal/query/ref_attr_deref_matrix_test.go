@@ -132,6 +132,11 @@ func TestRefAttrDereferenceMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("компиляция: %v", err)
 			}
+			// Результат — ссылка на «Учётку», а не строка: колонка помечена
+			// ссылочной, и DSL оборачивает её значение в ссылку (#1784, вариант 1).
+			if got := r.RefColumns["учётка"]; got != "Учётка" {
+				t.Fatalf("RefColumns[учётка]=%q, ожидалась ссылка на «Учётка»: %v", got, r.RefColumns)
+			}
 			rows, err := db.Query(context.Background(), r.SQL, r.Args...)
 			if err != nil {
 				t.Fatalf("исполнение: %v\nSQL: %s", err, r.SQL)

@@ -2604,21 +2604,23 @@ func buildRefDimInfosWithEntities(dims []metadata.Field, entities []*metadata.En
 // на реквизитах-ссылках, поэтому выглядело как опечатка в конфигурации (#1784).
 //
 // pos — позиция реквизита; квалификатор берётся прямо перед точкой. Пустая
-// строка — «ничего не знаем», вызывающий оставляет имя как есть.
-func (tr *translator) refAttrColumnForPrevQualifier(pos int, attr string) string {
+// строка — «ничего не знаем», вызывающий оставляет имя как есть. refEntity —
+// на что ссылается реквизит (пусто у нессылочного): в выборке значение такого
+// разыменования — ссылка, как у прямого ссылочного реквизита.
+func (tr *translator) refAttrColumnForPrevQualifier(pos int, attr string) (col, refEntity string) {
 	if pos < 2 || pos >= len(tr.tokens) {
-		return ""
+		return "", ""
 	}
 	if tr.tokens[pos-1].kind != tDot || tr.tokens[pos-2].kind != tIdent {
-		return ""
+		return "", ""
 	}
 	return tr.refAttrColumn(lowerFast(tr.tokens[pos-2].val), attr)
 }
 
-func (tr *translator) refAttrColumn(qualifier, attr string) string {
+func (tr *translator) refAttrColumn(qualifier, attr string) (col, refEntity string) {
 	rd := tr.findRefDim(qualifier)
 	if rd == nil || rd.refEntity == "" {
-		return ""
+		return "", ""
 	}
 	for _, ent := range tr.opts.Entities {
 		if !strings.EqualFold(ent.Name, rd.refEntity) {
@@ -2626,12 +2628,12 @@ func (tr *translator) refAttrColumn(qualifier, attr string) string {
 		}
 		for _, f := range ent.Fields {
 			if strings.EqualFold(f.Name, attr) {
-				return metadata.ColumnName(f)
+				return metadata.ColumnName(f), strings.TrimSpace(f.RefEntity)
 			}
 		}
-		return ""
+		return "", ""
 	}
-	return ""
+	return "", ""
 }
 
 func (tr *translator) findRefDim(name string) *refDimInfo {
@@ -2803,10 +2805,15 @@ func preScanMainRefSource(tokens []tok, opts CompileOpts) mainRefSource {
 // «КАК X», иначе `id`: именно так называет её SQL (Ссылка → id, Реквизит.Ссылка →
 // ref_реквизит.id).
 func (tr *translator) noteRefOutput(entity string) {
+	tr.noteRefOutputAs(entity, "id")
+}
+
+// noteRefOutputAs — то же с именем колонки результата по умолчанию (без «КАК»).
+func (tr *translator) noteRefOutputAs(entity, defaultOut string) {
 	if entity == "" || tr.section != sectionSelect || tr.parenDepth > 0 {
 		return
 	}
-	out := "id"
+	out := defaultOut
 	if p := upperFast(tr.peek(0).val); p == "КАК" || p == "AS" {
 		if n := tr.peek(1); n.kind == tIdent {
 			// `КАК Ссылка` — имя зарезервировано: SQL-алиасом становится всё тот
@@ -4635,8 +4642,12 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 						}
 					} else if c, ok2 := tr.colMap[lower]; ok2 {
 						tr.emitQualifiedColumn(c, lower)
-					} else if col := tr.refAttrColumnForPrevQualifier(tr.pos-1, lower); col != "" {
+					} else if col, refEntity := tr.refAttrColumnForPrevQualifier(tr.pos-1, lower); col != "" {
 						tr.emitQualifiedColumn(col, lower)
+						// Выборка «Исполнитель.Учётка» отдаёт ссылку, а не
+						// строку UUID (#1784, вариант 1). Имя колонки результата
+						// без «КАК» — имя SQL-колонки, как у «Реквизит.Ссылка».
+						tr.noteRefOutputAs(refEntity, col)
 					} else {
 						tr.emitQualifiedColumn(lower, lower)
 					}
