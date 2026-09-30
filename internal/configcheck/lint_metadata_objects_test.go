@@ -37,11 +37,11 @@ func TestLintUnknownMetadataObject(t *testing.T) {
 		}
 	}
 	sort.Strings(got)
-	want := []struct{ kind, name, suggest string }{
-		{"DSL обработка", "Документы.ПоступлениеНаРасчётныйСчт", "ПоступлениеНаРасчётныйСчёт"},
-		{"DSL обработка", "Documents.Расход", ""},
-		{"DSL объект", "Движения.Остатк", "Остатки"},
-		{"DSL форма обработки", "Справочники.Товр", "Товар"},
+	want := []struct{ kind, name, what, suggest string }{
+		{"DSL обработка", "Документы.ПоступлениеНаРасчётныйСчт", "документ", "ПоступлениеНаРасчётныйСчёт"},
+		{"DSL обработка", "Documents.Расход", "документ", ""},
+		{"DSL объект", "Движения.Остатк", "регистр", "Остатки"},
+		{"DSL форма обработки", "Справочники.Товр", "справочник", "Товар"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("ожидалось %d предупреждения, получено %d:\n%s", len(want), len(got), strings.Join(got, "\n"))
@@ -54,6 +54,10 @@ func TestLintUnknownMetadataObject(t *testing.T) {
 				continue
 			}
 			found = true
+			wantMessage := w.name + ": такого объекта (" + w.what + ") в конфигурации нет"
+			if parts[1] != wantMessage {
+				t.Errorf("%s: недостоверный текст предупреждения: %q, ожидалось %q", w.name, parts[1], wantMessage)
+			}
 			if w.suggest != "" && !strings.Contains(parts[2], w.suggest) {
 				t.Errorf("%s: подсказка не называет %q: %q", w.name, w.suggest, parts[2])
 			}
