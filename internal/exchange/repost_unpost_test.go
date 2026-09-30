@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ivantit66/onebase/internal/dbtest"
 	"github.com/ivantit66/onebase/internal/dsl/ast"
 	"github.com/ivantit66/onebase/internal/dsl/interpreter"
 	"github.com/ivantit66/onebase/internal/dsl/lexer"
@@ -35,141 +36,170 @@ func TestApplyPackage_UnpostedVersionClearsReceiverMovements(t *testing.T) {
 		// repostFails: источник прислал новую ПРОВЕДЁННУЮ версию, а её
 		// перепроведение на приёмнике сорвалось.
 		repostFails bool
+		// Старый обмен оставлял posted=false при сохранённых движениях.
+		legacyUnposted bool
 	}{
-		{"отмена проведения на источнике", false, false},
-		{"пометка удаления на источнике", true, false},
-		{"перепроведение новой версии сорвалось", false, true},
+		{"отмена проведения на источнике", false, false, false},
+		{"пометка удаления на источнике", true, false, false},
+		{"перепроведение новой версии сорвалось", false, true, false},
+		{"старые движения после отмены проведения", false, false, true},
+		{"старые движения после пометки удаления", true, false, true},
+		{"старые движения после ошибки перепроведения", false, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			doc := &metadata.Entity{
-				Name: "Продажа", Kind: metadata.KindDocument, Posting: true,
-				Fields: []metadata.Field{
-					{Name: "Товар", Type: metadata.FieldTypeString},
-					{Name: "Количество", Type: metadata.FieldTypeNumber},
-				},
-			}
-			reg := &metadata.Register{
-				Name:       "Остатки",
-				Dimensions: []metadata.Field{{Name: "Товар", Type: metadata.FieldTypeString}},
-				Resources:  []metadata.Field{{Name: "Количество", Type: metadata.FieldTypeNumber}},
-			}
-			plan := repostPlan(true)
+			dbtest.ForEachDialect(t, func(t *testing.T, b *storage.DB) {
+				doc := &metadata.Entity{
+					Name: "Продажа", Kind: metadata.KindDocument, Posting: true,
+					Fields: []metadata.Field{
+						{Name: "Товар", Type: metadata.FieldTypeString},
+						{Name: "Количество", Type: metadata.FieldTypeNumber},
+					},
+				}
+				reg := &metadata.Register{
+					Name:       "Остатки",
+					Totals:     metadata.RegisterTotals{Enabled: true},
+					Dimensions: []metadata.Field{{Name: "Товар", Type: metadata.FieldTypeString}},
+					Resources:  []metadata.Field{{Name: "Количество", Type: metadata.FieldTypeNumber}},
+				}
+				plan := repostPlan(true)
 
-			// Источник: документ проведён и зарегистрирован для fil01.
-			a, ctxA := newBase(t, doc)
-			if err := a.SaveExchangeThisNode(ctxA, plan.Name, "center"); err != nil {
-				t.Fatal(err)
-			}
-			id := uuid.New()
-			fields := map[string]any{"Товар": "Гвоздь", "Количество": float64(10)}
-			if err := a.Upsert(ctxA, doc.Name, id, fields, doc); err != nil {
-				t.Fatal(err)
-			}
-			if err := a.SetPosted(ctxA, doc.Name, id, true); err != nil {
-				t.Fatal(err)
-			}
-			register := func(changedAt int64) []byte {
-				t.Helper()
-				v, err := a.EntityVersion(ctxA, doc.Name, id)
-				if err != nil {
+				// Источник: документ проведён и зарегистрирован для fil01.
+				a, ctxA := newBase(t, doc)
+				if err := a.SaveExchangeThisNode(ctxA, plan.Name, "center"); err != nil {
 					t.Fatal(err)
 				}
-				if err := a.RegisterExchangeChange(ctxA, storage.ExchangeChange{
-					Plan: plan.Name, ObjectType: doc.Name, ObjectID: id.String(), NodeCode: "fil01",
-					Version: v, Deletion: tc.deletion && changedAt > 1000, ChangedAt: changedAt,
-				}); err != nil {
+				id := uuid.New()
+				fields := map[string]any{"Товар": "Гвоздь", "Количество": float64(10)}
+				if err := a.Upsert(ctxA, doc.Name, id, fields, doc); err != nil {
 					t.Fatal(err)
 				}
-				data, err := exchange.BuildPackage(ctxA, a, fakeResolver{doc.Name: doc}, plan, "fil01")
-				if err != nil {
+				if err := a.SetPosted(ctxA, doc.Name, id, true); err != nil {
 					t.Fatal(err)
 				}
-				return data
-			}
-			posted := register(1000)
+				register := func(changedAt int64) []byte {
+					t.Helper()
+					v, err := a.EntityVersion(ctxA, doc.Name, id)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := a.RegisterExchangeChange(ctxA, storage.ExchangeChange{
+						Plan: plan.Name, ObjectType: doc.Name, ObjectID: id.String(), NodeCode: "fil01",
+						Version: v, Deletion: tc.deletion && changedAt > 1000, ChangedAt: changedAt,
+					}); err != nil {
+						t.Fatal(err)
+					}
+					data, err := exchange.BuildPackage(ctxA, a, fakeResolver{doc.Name: doc}, plan, "fil01")
+					if err != nil {
+						t.Fatal(err)
+					}
+					return data
+				}
+				posted := register(1000)
 
-			// Приёмник: настоящий реестр и перепроведение модулем проведения.
-			b, ctxB := newBase(t, doc)
-			if err := b.MigrateRegisters(ctxB, []*metadata.Register{reg}); err != nil {
-				t.Fatal(err)
-			}
-			if err := b.SaveExchangeThisNode(ctxB, plan.Name, "fil01"); err != nil {
-				t.Fatal(err)
-			}
-			registry := runtime.NewRegistry()
-			registry.Load(runtime.LoadOptions{
-				Entities:  []*metadata.Entity{doc},
-				Registers: []*metadata.Register{reg},
-				Programs: map[string]*ast.Program{doc.Name: parseProgram(t, `Процедура OnPost()
+				// Приёмник: настоящий реестр и перепроведение модулем проведения.
+				ctxB := context.Background()
+				if err := b.EnsureExchangeSchema(ctxB); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.Migrate(ctxB, []*metadata.Entity{doc}); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.MigrateRegisters(ctxB, []*metadata.Register{reg}); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.SaveExchangeThisNode(ctxB, plan.Name, "fil01"); err != nil {
+					t.Fatal(err)
+				}
+				registry := runtime.NewRegistry()
+				registry.Load(runtime.LoadOptions{
+					Entities:  []*metadata.Entity{doc},
+					Registers: []*metadata.Register{reg},
+					Programs: map[string]*ast.Program{doc.Name: parseProgram(t, `Процедура OnPost()
   Дв = Движения.Остатки.Добавить();
   Дв.Товар = this.Товар;
   Дв.Количество = this.Количество;
 КонецПроцедуры`)},
+				})
+				interp := interpreter.New()
+				interp.LookupProc = registry.GetModuleProc
+				svc := &entityservice.Service{
+					Store: b, Reg: registry, Interp: interp,
+					BuildVars: func(c context.Context, mc *runtime.MovementsCollector, _ *[]string) (map[string]any, *interpreter.TxState) {
+						return dslvars.Common{Ctx: c, Reg: registry, Store: b, Movements: mc}.Build(), nil
+					},
+				}
+				opts := exchange.ApplyOptions{Repost: svc.Repost}
+				movements := func() int {
+					t.Helper()
+					var n int
+					if err := b.QueryRow(ctxB, "SELECT COUNT(*) FROM "+metadata.RegisterTableName(reg.Name)+
+						" WHERE recorder = "+b.Dialect().Placeholder(1), id.String()).Scan(&n); err != nil {
+						t.Fatal(err)
+					}
+					return n
+				}
+
+				if _, err := exchange.ApplyPackage(ctxB, b, registry, plan, posted, opts); err != nil {
+					t.Fatalf("загрузка проведённой версии: %v", err)
+				}
+				if n := movements(); n != 1 {
+					t.Fatalf("после перепроведения на приёмнике %d движений, ожидалось 1", n)
+				}
+
+				if tc.legacyUnposted {
+					// Воспроизводим состояние базы после прежней загрузки:
+					// документ уже непроведён, его настоящие движения ещё лежат.
+					if err := b.SetPosted(ctxB, doc.Name, id, false); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				// Источник отменяет проведение, помечает на удаление или меняет
+				// проведённый документ — новая ревизия.
+				if tc.repostFails {
+					fields = map[string]any{"Товар": "Гвоздь", "Количество": float64(7)}
+				}
+				if err := a.Upsert(ctxA, doc.Name, id, fields, doc); err != nil {
+					t.Fatal(err)
+				}
+				if tc.deletion {
+					if err := a.MarkForDeletion(ctxA, doc.Name, id, true); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := a.SetPosted(ctxA, doc.Name, id, tc.repostFails); err != nil {
+					t.Fatal(err)
+				}
+				next := register(2000)
+
+				if tc.repostFails {
+					failing := exchange.ApplyOptions{Repost: func(context.Context, string, uuid.UUID) error {
+						return errors.New("перепроведение сорвалось")
+					}}
+					if _, err := exchange.ApplyPackage(ctxB, b, registry, plan, next, failing); err == nil {
+						t.Fatal("ошибка перепроведения должна вернуться вызывающему")
+					}
+				} else if _, err := exchange.ApplyPackage(ctxB, b, registry, plan, next, opts); err != nil {
+					t.Fatalf("загрузка новой версии: %v", err)
+				}
+				row, err := b.GetByID(ctxB, doc.Name, id, doc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if toBoolT(row["posted"]) {
+					t.Fatalf("документ на приёмнике остался проведённым")
+				}
+				if n := movements(); n != 0 {
+					t.Fatalf("документ на приёмнике не проведён, а его движений в регистре %d — остатки считают непроведённый документ", n)
+				}
+				var quantity float64
+				if err := b.QueryRow(ctxB, "SELECT COALESCE(SUM(CAST(количество AS NUMERIC)), 0) FROM "+metadata.RegisterTotalsTableName(reg.Name)).Scan(&quantity); err != nil {
+					t.Fatal(err)
+				}
+				if quantity != 0 {
+					t.Fatalf("итоги после очистки = %v, ожидался нулевой остаток", quantity)
+				}
 			})
-			interp := interpreter.New()
-			interp.LookupProc = registry.GetModuleProc
-			svc := &entityservice.Service{
-				Store: b, Reg: registry, Interp: interp,
-				BuildVars: func(c context.Context, mc *runtime.MovementsCollector, _ *[]string) (map[string]any, *interpreter.TxState) {
-					return dslvars.Common{Ctx: c, Reg: registry, Store: b, Movements: mc}.Build(), nil
-				},
-			}
-			opts := exchange.ApplyOptions{Repost: svc.Repost}
-			movements := func() int {
-				t.Helper()
-				var n int
-				if err := b.QueryRow(ctxB, "SELECT COUNT(*) FROM "+metadata.RegisterTableName(reg.Name)+
-					" WHERE recorder = ?", id.String()).Scan(&n); err != nil {
-					t.Fatal(err)
-				}
-				return n
-			}
-
-			if _, err := exchange.ApplyPackage(ctxB, b, registry, plan, posted, opts); err != nil {
-				t.Fatalf("загрузка проведённой версии: %v", err)
-			}
-			if n := movements(); n != 1 {
-				t.Fatalf("после перепроведения на приёмнике %d движений, ожидалось 1", n)
-			}
-
-			// Источник отменяет проведение, помечает на удаление или меняет
-			// проведённый документ — новая ревизия.
-			if tc.repostFails {
-				fields = map[string]any{"Товар": "Гвоздь", "Количество": float64(7)}
-			}
-			if err := a.Upsert(ctxA, doc.Name, id, fields, doc); err != nil {
-				t.Fatal(err)
-			}
-			if tc.deletion {
-				if err := a.MarkForDeletion(ctxA, doc.Name, id, true); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := a.SetPosted(ctxA, doc.Name, id, tc.repostFails); err != nil {
-				t.Fatal(err)
-			}
-			next := register(2000)
-
-			if tc.repostFails {
-				failing := exchange.ApplyOptions{Repost: func(context.Context, string, uuid.UUID) error {
-					return errors.New("перепроведение сорвалось")
-				}}
-				if _, err := exchange.ApplyPackage(ctxB, b, registry, plan, next, failing); err == nil {
-					t.Fatal("ошибка перепроведения должна вернуться вызывающему")
-				}
-			} else if _, err := exchange.ApplyPackage(ctxB, b, registry, plan, next, opts); err != nil {
-				t.Fatalf("загрузка новой версии: %v", err)
-			}
-			row, err := b.GetByID(ctxB, doc.Name, id, doc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if toBoolT(row["posted"]) {
-				t.Fatalf("документ на приёмнике остался проведённым")
-			}
-			if n := movements(); n != 0 {
-				t.Fatalf("документ на приёмнике не проведён, а его движений в регистре %d — остатки считают непроведённый документ", n)
-			}
 		})
 	}
 }

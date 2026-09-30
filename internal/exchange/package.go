@@ -762,7 +762,7 @@ type movementRegistry interface {
 	AccountRegisters() []*metadata.AccountRegister
 }
 
-// clearReceiverMovements снимает движения документа, проведённого у приёмника,
+// clearReceiverMovements снимает движения существующего проводимого документа
 // перед применением его новой версии.
 //
 // Документ из пакета записывается непроведённым (SetExchangeObjectState ставит
@@ -772,7 +772,9 @@ type movementRegistry interface {
 // источнике давали у приёмника «непроведённый» документ, чьи движения
 // по-прежнему в остатках, а сорвавшееся перепроведение — непроведённый документ с
 // движениями прежней версии. Снимаем их в транзакции загрузки: документ либо
-// перепроведётся заново, либо останется непроведённым без движений.
+// перепроведётся заново, либо останется непроведённым без движений. Признак
+// posted не служит гейтом: старый обмен уже мог оставить posted = false при
+// сохранённых движениях. Следующая новая версия исправляет и такое состояние.
 func clearReceiverMovements(ctx context.Context, store *storage.DB, resolver EntityResolver, ent *metadata.Entity, id uuid.UUID) error {
 	if ent.Kind != metadata.KindDocument || !ent.Posting {
 		return nil
@@ -781,16 +783,9 @@ func clearReceiverMovements(ctx context.Context, store *storage.DB, resolver Ent
 	if err != nil || !exists {
 		return err
 	}
-	row, err := store.GetByID(ctx, ent.Name, id, ent)
-	if err != nil {
-		return err
-	}
-	if !toBool(row["posted"]) {
-		return nil
-	}
 	regs, ok := resolver.(movementRegistry)
 	if !ok {
-		return fmt.Errorf("exchange: документ %s %s проведён на приёмнике, но резолвер не перечисляет регистры — снять его движения нечем", ent.Name, id)
+		return fmt.Errorf("exchange: документ %s %s существует на приёмнике, но резолвер не перечисляет регистры — снять его движения нечем", ent.Name, id)
 	}
 	return store.ClearRecorderMovements(ctx, ent.Name, id, regs.Registers(), regs.InfoRegisters(), regs.AccountRegisters())
 }
