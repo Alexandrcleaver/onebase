@@ -402,6 +402,8 @@ func entityYAMLSchema() *yamlLintSchema {
 	})
 	return with(obj(
 		"name", "title", "description", "posting", "hierarchical", "hierarchy_kind",
+		// owner — справочник-владелец (подчинённый справочник, 1С «Владелец»).
+		"owner",
 		"presentation", "order_by", "choice_preview", "choice_preview_proc",
 		"list_form", "item_form", "based_on", "list_mode", "notify_changes", "list_refresh_on",
 		"fulltext", "search_fields", "detail_panel",
@@ -625,12 +627,18 @@ func formModuleYAMLSchema() *yamlLintSchema {
 	} {
 		element.keys[k] = nil
 	}
+	// choice_filter — «реквизит выбираемого справочника → путь к значению»
+	// (связи параметров выбора), тоже свободная карта.
+	element.keys["choice_filter"] = freeMap()
 	// choice_context — карта «параметр → путь к значению», а не скаляр: состав
 	// ключей свободный, поэтому freeMap, иначе линт ругался бы на каждое имя
 	// параметра.
 	element.keys["choice_context"] = freeMap()
 	element.keys["title"] = freeMap()
 	element.keys["events"] = freeMap()
+	// props остаётся свободной картой: про ключи, которых не читает ни один
+	// потребитель, говорит CheckFormProps — там есть, кем именно ключ не
+	// используется, а здесь было бы только «неизвестный ключ» (#1492).
 	element.keys["props"] = freeMap()
 	element.keys["children"] = seq(element)
 	element.keys["choices"] = seq(with(obj("value"), map[string]*yamlLintSchema{"title": freeMap()}))

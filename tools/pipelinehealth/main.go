@@ -35,6 +35,7 @@ var (
 	triageRouteLabels = regexp.MustCompile(`(?m)^<!-- pp:triage-route-labels claim=([0-9]+) fingerprint-sha256=([0-9a-f]{64}) .+ -->$`)
 	triageAuthorReply = regexp.MustCompile(`(?m)^<!-- pp:triage-author-reply claim=([0-9]+) fingerprint-sha256=([0-9a-f]{64}) -->$`)
 	triageRouteDone   = regexp.MustCompile(`(?m)^<!-- pp:triage-route-done claim=([0-9]+) fingerprint-sha256=([0-9a-f]{64}) -->$`)
+	triageRouteVoid   = regexp.MustCompile(`(?m)^<!-- pp:triage-route-void claim=([0-9]+) -->$`)
 )
 
 type apiUser struct {
@@ -368,6 +369,10 @@ func analyze(prs []apiPull, owner string) report {
 		priority, prioritySource := queuePriority(labels, pr.CreatedAt, now)
 		item := candidate{Number: pr.Number, Title: pr.Title, URL: pr.HTMLURL, Head: pr.Head.SHA, Depth: depth, Stage: "review", Priority: priority, PrioritySource: prioritySource, UpdatedAt: pr.UpdatedAt}
 		currentCompletions, latestCompletion, latestOverride := currentProtocolState(pr.Comments, owner, pr.Head.SHA)
+		legacySourceCompletions := 0
+		if headIsBaseSyncMerge(pr) {
+			legacySourceCompletions, _, _ = currentProtocolState(pr.Comments, owner, pr.HeadParents[0])
+		}
 		carryDone, carryIntentOpen, v1AbortCurrent, baseAdvanced, protocolHistory, integrationAt := baseSyncRESTState(pr.Comments, owner, pr.Head.SHA, pr.HeadParents)
 		item.IntegrationAt = integrationAt
 		if baseAdvanced {
@@ -426,6 +431,14 @@ func analyze(prs []apiPull, owner string) report {
 				result.MergeCandidates = append(result.MergeCandidates, item)
 			case v1AbortCurrent && currentCompletions == 0:
 				result.ContentReviewCandidates = append(result.ContentReviewCandidates, item)
+			case depth > 0 && headIsBaseSyncMerge(pr) && legacySourceCompletions == 0:
+				// A legacy integration review cannot reconstruct the first parent's
+				// content proof. Do not grant this PR single-flight ownership only to
+				// have the independent GraphQL gate reject it on every retry.
+				item.Stage = "legacy-source-proof-missing"
+				result.HumanWaiting = append(result.HumanWaiting, item)
+				result.add("yellow", "legacy_source_review_missing", pr.Number,
+					"первый родитель merge-коммита не имеет доверенного завершённого REVIEW; требуется восстановление маршрута человеком, остальные PR не блокируются")
 			case currentCompletions > 0 && depth > currentCompletions && headIsBaseSyncMerge(pr):
 				item.Stage = "legacy-integration-merge-ready"
 				result.ReviewCandidates = append(result.ReviewCandidates, item)
@@ -532,6 +545,14 @@ func analyzeIssues(result *report, issues []apiIssue, prs []apiPull, owner strin
 		}
 
 		labels := labelSet(issue.Labels)
+		if labels["ready-fix"] && labels["needs-decision"] && !labels["approved"] {
+			result.addIssue("yellow", "issue_route_conflict", issue.Number,
+				"ready-fix конфликтует с needs-decision: автоматический FIX остановлен до явного решения")
+		}
+		if labels["manual"] && (labels["approved"] || labels["ready-fix"] || labels["plan-needed"] || labels["in-work"]) {
+			result.addIssue("yellow", "manual_route_conflict", issue.Number,
+				"manual сочетается с автоматической маршрутной меткой, которая не будет исполнена")
+		}
 		route := inspectTriageRoute(issue, owner)
 		routeFinding := false
 		routeMismatch := false
@@ -668,7 +689,7 @@ func inspectTriageRoute(issue apiIssue, owner string) triageRouteState {
 	}
 	state.route = records[0][3]
 	claimID := strconv.FormatInt(root.ID, 10)
-	labelsCommitted, replyCommitted, done := false, false, false
+	labelsCommitted, replyCommitted, done, voided := false, false, false, false
 	replyRequired := records[0][4] == "required"
 	for _, comment := range thread {
 		if !trustedUnedited(comment, owner) || comment.CreatedAt < root.CreatedAt ||
@@ -690,6 +711,17 @@ func inspectTriageRoute(issue apiIssue, owner string) triageRouteState {
 				done = true
 			}
 		}
+		for _, match := range triageRouteVoid.FindAllStringSubmatch(comment.Body, -1) {
+			if match[1] == claimID {
+				voided = true
+			}
+		}
+	}
+	// Право объявить транзакцию мёртвой — у человека, и только точной строкой:
+	// TRIAGE не может ни завершить чужой label POST, ни доказать его владельца.
+	// После void маршрутной записи больше нет — FIX идёт по фактическим меткам.
+	if voided {
+		return triageRouteState{ready: true}
 	}
 	if !done {
 		state.reason = "TRIAGE route claim is unfinished; FIX must wait for matching labels/reply/done markers"
@@ -783,13 +815,22 @@ func checkContract(result *report, path string) {
 	mergeData, err := readContract(filepath.Join(skillsRoot, "merge-shepherd", "SKILL.md"))
 	if err != nil || !strings.Contains(text, "pp:base-sync-done") ||
 		!strings.Contains(text, "single-flight-барьер") ||
+		!strings.Contains(text, "Позиция edge нового коммита относительно") ||
+		!strings.Contains(text, "доказывай графом") ||
+		strings.Contains(text, "обязан быть ровно одним `PullRequestCommit` после") ||
 		!strings.Contains(string(mergeData), "pp:base-sync-intent") ||
-		!strings.Contains(string(mergeData), "pp:merge-cleanup-intent") ||
-		!strings.Contains(string(mergeData), "complete merge-cleanup") ||
 		!strings.Contains(string(mergeData), "повторный человеческий `ship` при валидной") ||
 		!strings.Contains(string(mergeData), "single-flight-барьер") {
 		result.add("red", "unsafe_base_sync_contract", 0,
 			"активные REVIEW/MERGE contracts не гарантируют перенос ship и single-flight через доказанный base-sync")
+		return
+	}
+	// Гарантии merge-cleanup отвечают за отдельный шаг — их поломка не должна
+	// маскироваться под проблему переноса ship/base-sync (#1524).
+	if !strings.Contains(string(mergeData), "pp:merge-cleanup-intent") ||
+		!strings.Contains(string(mergeData), "complete merge-cleanup") {
+		result.add("red", "unsafe_merge_cleanup_contract", 0,
+			"в merge-shepherd contract нет гарантий merge-cleanup (pp:merge-cleanup-intent / complete merge-cleanup)")
 		return
 	}
 	for _, name := range []string{"triage-issues", "plan-approved", "fix-approved", "review-queue", "merge-shepherd", "tail-issues"} {
