@@ -383,7 +383,7 @@ func (s *Server) form(w http.ResponseWriter, r *http.Request) {
 		folderOpts = s.loadFolderOptions(r.Context(), entity, values["parent_id"])
 	}
 	refOptions, _ := s.loadInitialRefOptions(r.Context(), entity, values)
-	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows)
+	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows, values)
 	s.renderEntityForm(w, r, "object", map[string]any{
 		"Entity":        entity,
 		"IsNew":         true,
@@ -861,7 +861,7 @@ func (s *Server) renderObjectFormError(w http.ResponseWriter, r *http.Request, e
 	}
 	tablePartRows := serializeTablePartRowsForEntity(tpRows, entity, managedForm)
 	refOptions, _ := s.loadInitialRefOptions(r.Context(), entity, values)
-	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows)
+	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows, values)
 	lang := s.resolveLang(r)
 	data := map[string]any{
 		"Entity":        entity,
@@ -1017,7 +1017,7 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		values := formValues(r, entity)
 		tablePartRows := serializeTablePartRowsForEntity(tpRows, entity, pickManagedForm(entity, "object"))
 		refOptions, _ := s.loadInitialRefOptions(r.Context(), entity, values)
-		tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows)
+		tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows, values)
 		langErr := s.resolveLang(r)
 		var fOpts []map[string]any
 		if entity.Hierarchical {
@@ -1141,10 +1141,16 @@ func (s *Server) refOptionsJSON(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = n
 	}
+	// Отбор подбора подчинённого справочника: «реквизит → значение» приезжает
+	// параметром flt от клиента (см. data-ref-filter в разметке). У подчинённого
+	// справочника без владельца выдача ПУСТА — и это ответ, а не ошибка: сначала
+	// контрагент, потом договор. Связи параметров выбора (план 170) едут своим
+	// контрактом choice и в flt не попадают.
+	base, fltOK := refOptionsFilters(ent, r.URL.Query().Get("flt"), storage.ListParams{})
 	items := make([]map[string]any, 0)
 	total := 0
-	if choice == nil || !choice.Empty {
-		extra := storage.ListParams{}
+	if fltOK && (choice == nil || !choice.Empty) {
+		extra := base
 		if choice != nil {
 			extra.ChoicePredicates = choice.Predicates
 			extra.IncludeFolders = choice.Folders
@@ -1173,8 +1179,11 @@ func (s *Server) refOptionsJSON(w http.ResponseWriter, r *http.Request) {
 	response["preview"] = previewField
 	if choice != nil && choice.Selected != nil {
 		allowed := false
-		if !choice.Empty {
-			allowed, err = s.choiceSelectedAllowed(r.Context(), ent, *choice.Selected, choice.Predicates, choice.Folders)
+		if !choice.Empty && fltOK {
+			check := base
+			check.ChoicePredicates = choice.Predicates
+			check.IncludeFolders = choice.Folders
+			allowed, err = s.choiceSelectedAllowedWithParams(r.Context(), ent, *choice.Selected, check)
 			if err != nil {
 				s.serverError(w, r, err)
 				return
@@ -1555,7 +1564,7 @@ func (s *Server) formEdit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	refOptions, _ := s.loadInitialRefOptions(r.Context(), entity, vals)
-	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tpRows)
+	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tpRows, vals)
 
 	editUser := auth.UserFromContext(r.Context())
 	editIsAdmin := editUser == nil || editUser.IsAdmin
@@ -1725,7 +1734,7 @@ func (s *Server) submitEdit(w http.ResponseWriter, r *http.Request) {
 		values := formValues(r, entity)
 		tablePartRows := serializeTablePartRowsForEntity(tpRows, entity, pickManagedForm(entity, "object"))
 		refOptions, _ := s.loadInitialRefOptions(r.Context(), entity, values)
-		tpRefOpts2, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows)
+		tpRefOpts2, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows, values)
 		values["_version"] = r.FormValue("_version")
 		langSubmit := s.resolveLang(r)
 		var fOpts []map[string]any
