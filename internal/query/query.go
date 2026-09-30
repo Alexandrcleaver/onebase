@@ -648,6 +648,22 @@ func (rd refDimInfo) displayCol() string {
 	return rd.joinAlias + ".наименование"
 }
 
+// joinSource — то, что стоит в авто-JOIN ссылочного поля после LEFT JOIN.
+// Учётные записи присоединяются не таблицей, а проекцией из колонок, которые
+// язык запросов и так читает (Ссылка, Логин, ПолноеИмя, представление).
+// Звёздочка без квалификатора разворачивается во все колонки всех источников
+// FROM, включая авто-JOIN, а он появляется, как только запрос упоминает
+// ссылку: «ВЫБРАТЬ * ИЗ Документ.Заказ ГДЕ Автор.Логин <> ""» отдавал хеш
+// пароля, секрет второго фактора и признак администратора (#1752). Проекция
+// закрывает и этот путь, и любой другой, где колонки соединения читаются
+// мимо проверки имён реквизитов.
+func (rd refDimInfo) joinSource() string {
+	if metadata.IsSystemRefTarget(rd.refEntity) {
+		return "(SELECT id, login, full_name FROM " + rd.joinTable + ")"
+	}
+	return rd.joinTable
+}
+
 // systemRefQualifierAt возвращает ссылочный реквизит на системную таблицу
 // учётных записей, если токен pos — его имя и вместо него уже выпущен
 // псевдоним авто-JOIN с точкой («ref_автор .»). Иначе nil: одноимённый алиас
@@ -2768,7 +2784,7 @@ func (tr *translator) emitVTSubquery(subq, defaultAlias string) error {
 				} else if s != "" {
 					joinCond += " AND " + s
 				}
-				tr.emit(fmt.Sprintf("LEFT JOIN %s %s ON %s", rd.joinTable, rd.joinAlias, joinCond))
+				tr.emit(fmt.Sprintf("LEFT JOIN %s %s ON %s", rd.joinSource(), rd.joinAlias, joinCond))
 				// #14: связанная сущность ссылочного измерения VT — источник RBAC.
 				tr.addRefSource(rd)
 			}
@@ -4441,7 +4457,7 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 					} else if s != "" {
 						joinCond += " AND " + s
 					}
-					tr.emit(fmt.Sprintf("LEFT JOIN %s %s ON %s", rd.joinTable, rd.joinAlias, joinCond))
+					tr.emit(fmt.Sprintf("LEFT JOIN %s %s ON %s", rd.joinSource(), rd.joinAlias, joinCond))
 					// #14: авто-JOIN ссылочного поля читает наименование/номер
 					// связанной сущности — регистрируем её как источник для RBAC,
 					// иначе чтение через ссылку обходит проверку прав.

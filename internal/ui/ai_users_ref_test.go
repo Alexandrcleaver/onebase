@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/base64"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,6 +84,31 @@ func TestAIRunQuery_UsersRefDoesNotExposeAuthColumns(t *testing.T) {
 		}
 		if !strings.Contains(res.Content, "недоступно") {
 			t.Errorf("%s: отказ не называет причину: %s", q, res.Content)
+		}
+	}
+
+	// Звёздочка без квалификатора разворачивает и авто-JOIN учётки, а он
+	// появляется, как только запрос упоминает ссылку (#1752). Запрос законный
+	// и выполняется, но служебных колонок учётки в ответе нет.
+	var hash []byte
+	if err := db.QueryRow(ctx, `SELECT password_hash FROM _users WHERE login = 'boss'`).Scan(&hash); err != nil || len(hash) == 0 {
+		t.Fatalf("хеш пароля: %v (%d байт)", err, len(hash))
+	}
+	for _, q := range []string{
+		"ВЫБРАТЬ * ИЗ Документ.Заказ ГДЕ Автор.Логин <> \"\"",
+		"ВЫБРАТЬ * ИЗ Документ.Заказ УПОРЯДОЧИТЬ ПО Автор.Наименование",
+	} {
+		res := run(q)
+		if res.IsError {
+			t.Fatalf("%s: запрос отклонён: %s", q, res.Content)
+		}
+		for _, secret := range []string{"password_hash", "totp_secret", "is_admin", "auth_subject", string(hash), base64.StdEncoding.EncodeToString(hash)} {
+			if strings.Contains(res.Content, secret) {
+				t.Fatalf("%s: в ответе ассистенту %q: %s", q, secret, res.Content)
+			}
+		}
+		if !strings.Contains(res.Content, "boss") {
+			t.Fatalf("%s: звёздочка потеряла разрешённый логин учётки: %s", q, res.Content)
 		}
 	}
 

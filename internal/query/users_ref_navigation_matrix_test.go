@@ -139,6 +139,69 @@ func TestUsersRefNavigationRejectsAuthColumns(t *testing.T) {
 	}
 }
 
+// Звёздочка без квалификатора разворачивается во все колонки источников FROM,
+// включая авто-JOIN учётных записей, а он появляется, как только запрос
+// упоминает ссылку — хоть в отборе, хоть в сортировке. Раньше
+// «ВЫБРАТЬ * ИЗ Документ.Заявка ГДЕ Автор.Логин <> ""» отдавал всю строку
+// _users: хеш пароля, секрет второго фактора, признак администратора (#1752).
+// Звёздочка остаётся законной, но от учётки в результат попадают только
+// login и full_name.
+func TestUsersRefStarDoesNotExposeAuthColumns(t *testing.T) {
+	dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+		ctx := context.Background()
+		repo := auth.NewRepo(db)
+		if err := repo.EnsureSchema(ctx); err != nil {
+			t.Fatalf("EnsureSchema: %v", err)
+		}
+		boss, err := repo.Create(ctx, "boss", "пароль-123456", "Директор", true)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		var hash []byte
+		if err := db.QueryRow(ctx, `SELECT password_hash FROM _users WHERE login = 'boss'`).Scan(&hash); err != nil || len(hash) == 0 {
+			t.Fatalf("хеш пароля: %v (%d байт)", err, len(hash))
+		}
+		заявка := usersRefEntity()
+		if err := db.Migrate(ctx, []*metadata.Entity{заявка}); err != nil {
+			t.Fatalf("Migrate: %v", err)
+		}
+		if err := db.Upsert(ctx, заявка.Name, uuid.New(), map[string]any{"Номер": "0001", "Автор": boss.ID}, заявка); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		own, err := db.QueryAll(ctx, `SELECT * FROM заявка`)
+		if err != nil || len(own) != 1 {
+			t.Fatalf("колонки документа: %v (%d строк)", err, len(own))
+		}
+		for _, text := range []string{
+			`ВЫБРАТЬ * ИЗ Документ.Заявка ГДЕ Автор.Логин <> ""`,
+			`ВЫБРАТЬ * ИЗ Документ.Заявка УПОРЯДОЧИТЬ ПО Автор.Наименование`,
+		} {
+			compiled, err := query.Compile(text, query.CompileOpts{Dialect: db.Dialect(), Entities: []*metadata.Entity{заявка}})
+			if err != nil {
+				t.Fatalf("%s: компиляция: %v", text, err)
+			}
+			rows, _, err := query.Run(ctx, db, &compiled)
+			if err != nil {
+				t.Fatalf("%s: выполнение: %v\nSQL: %s", text, err, compiled.SQL)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("%s: строк %d, ожидалась 1: %v", text, len(rows), rows)
+			}
+			for col, v := range rows[0] {
+				if _, ownCol := own[0][col]; !ownCol && col != "login" && col != "full_name" {
+					t.Errorf("%s: колонка учётки %q в результате\nSQL: %s", text, col, compiled.SQL)
+				}
+				if b, ok := v.([]byte); ok && string(b) == string(hash) {
+					t.Errorf("%s: хеш пароля в колонке %q\nSQL: %s", text, col, compiled.SQL)
+				}
+			}
+			if got := fmt.Sprint(rows[0]["login"]); got != "boss" {
+				t.Errorf("%s: login = %q, want boss (row %v)", text, got, rows[0])
+			}
+		}
+	})
+}
+
 func TestUsersRefJoinAliasDoesNotHideOwnField(t *testing.T) {
 	dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
 		ctx := context.Background()
