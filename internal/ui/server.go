@@ -23,7 +23,11 @@ import (
 	"github.com/ivantit66/onebase/internal/mailer"
 	"github.com/ivantit66/onebase/internal/metadata"
 	"github.com/ivantit66/onebase/internal/metrics"
+	"github.com/ivantit66/onebase/internal/navigation"
+	"github.com/ivantit66/onebase/internal/page"
+	"github.com/ivantit66/onebase/internal/processor"
 	"github.com/ivantit66/onebase/internal/realtime"
+	"github.com/ivantit66/onebase/internal/report"
 	"github.com/ivantit66/onebase/internal/runtime"
 	"github.com/ivantit66/onebase/internal/scheduler"
 	"github.com/ivantit66/onebase/internal/storage"
@@ -712,7 +716,8 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 	if len(contents.Catalogs) > 0 || len(contents.Documents) > 0 {
 		catSet := strSet(contents.Catalogs)
 		docSet := strSet(contents.Documents)
-		entities := s.reg.Entities()
+		names := append(append([]string(nil), contents.Catalogs...), contents.Documents...)
+		entities := navigation.Ordered(names, s.reg.Entities(), func(e *metadata.Entity) string { return e.Name })
 		var catalogs, documents []navItem
 		for _, e := range entities {
 			if !s.can(r, string(e.Kind), e.Name, "read") {
@@ -725,8 +730,6 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 				documents = append(documents, navItem{Label: e.DisplayName(lang), URL: url})
 			}
 		}
-		sortNavItems(catalogs)
-		sortNavItems(documents)
 		if len(catalogs) > 0 {
 			nav = append(nav, navGroup{Kind: s.tr(lang, "Справочники"), Items: catalogs, Open: true})
 		}
@@ -737,7 +740,7 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 
 	if len(contents.Registers) > 0 {
 		regSet := strSet(contents.Registers)
-		registers := s.reg.Registers()
+		registers := navigation.Ordered(contents.Registers, s.reg.Registers(), func(o *metadata.Register) string { return o.Name })
 		var regItems []navItem
 		for _, reg := range registers {
 			if !regSet[reg.Name] {
@@ -755,7 +758,6 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 				URL:   "/ui/register/" + strings.ToLower(reg.Name) + "/balances" + q,
 			})
 		}
-		sortNavItems(regItems)
 		if len(regItems) > 0 {
 			nav = append(nav, navGroup{Kind: s.tr(lang, "Регистры"), Items: regItems})
 		}
@@ -763,7 +765,7 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 
 	if len(contents.InfoRegs) > 0 {
 		irSet := strSet(contents.InfoRegs)
-		inforegs := s.reg.InfoRegisters()
+		inforegs := navigation.Ordered(contents.InfoRegs, s.reg.InfoRegisters(), func(o *metadata.InfoRegister) string { return o.Name })
 		var irItems []navItem
 		for _, ir := range inforegs {
 			if !irSet[ir.Name] {
@@ -778,7 +780,6 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 			}
 			irItems = append(irItems, navItem{Label: label, URL: "/ui/inforeg/" + strings.ToLower(ir.Name) + q})
 		}
-		sortNavItems(irItems)
 		if len(irItems) > 0 {
 			nav = append(nav, navGroup{Kind: s.tr(lang, "Регистры сведений"), Items: irItems})
 		}
@@ -786,7 +787,7 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 
 	if len(contents.Reports) > 0 {
 		repSet := strSet(contents.Reports)
-		reps := s.reg.Reports()
+		reps := navigation.Ordered(contents.Reports, s.reg.Reports(), func(o *report.Report) string { return o.Name })
 		var repItems []navItem
 		for _, rep := range reps {
 			if !repSet[rep.Name] {
@@ -798,7 +799,6 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 			label := rep.DisplayName(lang)
 			repItems = append(repItems, navItem{Label: label, URL: "/ui/report/" + strings.ToLower(rep.Name) + q})
 		}
-		sortNavItems(repItems)
 		if len(repItems) > 0 {
 			nav = append(nav, navGroup{Kind: s.tr(lang, "Отчёты"), Items: repItems})
 		}
@@ -806,7 +806,7 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 
 	if len(contents.Processors) > 0 {
 		procSet := strSet(contents.Processors)
-		procs := s.reg.Processors()
+		procs := navigation.Ordered(contents.Processors, s.reg.Processors(), func(o *processor.Processor) string { return o.Name })
 		var procItems []navItem
 		for _, proc := range procs {
 			if !procSet[proc.Name] {
@@ -818,7 +818,6 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 			label := proc.DisplayName(lang)
 			procItems = append(procItems, navItem{Label: label, URL: "/ui/processor/" + strings.ToLower(proc.Name) + q})
 		}
-		sortNavItems(procItems)
 		if len(procItems) > 0 {
 			nav = append(nav, navGroup{Kind: s.tr(lang, "Обработки"), Items: procItems})
 		}
@@ -826,7 +825,7 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 
 	if len(contents.Journals) > 0 {
 		jSet := strSet(contents.Journals)
-		journals := s.reg.Journals()
+		journals := navigation.Ordered(contents.Journals, s.reg.Journals(), func(o *metadata.Journal) string { return o.Name })
 		var jItems []navItem
 		for _, j2 := range journals {
 			if !jSet[j2.Name] {
@@ -834,7 +833,6 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 			}
 			jItems = append(jItems, navItem{Label: j2.DisplayName(lang), URL: "/ui/journal/" + strings.ToLower(j2.Name) + q})
 		}
-		sortNavItems(jItems)
 		if len(jItems) > 0 {
 			nav = append(nav, navGroup{Kind: s.tr(lang, "Журналы"), Items: jItems})
 		}
@@ -842,7 +840,7 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 
 	if len(contents.Pages) > 0 {
 		pageSet := strSet(contents.Pages)
-		pages := s.reg.Pages()
+		pages := navigation.Ordered(contents.Pages, s.reg.Pages(), func(o *page.Page) string { return o.Name })
 		var pageItems []navItem
 		for _, pg := range pages {
 			if !pageSet[pg.Name] || !s.canSeePage(r, pg) {
@@ -850,7 +848,6 @@ func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.Subsys
 			}
 			pageItems = append(pageItems, navItem{Label: pg.DisplayName(lang), URL: "/ui/page/" + pg.Name + q})
 		}
-		sortNavItems(pageItems)
 		if len(pageItems) > 0 {
 			nav = append(nav, navGroup{Kind: s.tr(lang, "Страницы"), Items: pageItems, Open: true})
 		}
