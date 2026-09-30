@@ -205,6 +205,15 @@ func CheckFormChoiceFilter(proj *project.Project) []Issue {
 					var targetField *metadata.Field
 					if !isFolder {
 						targetField = entityFieldFold(target, fieldName)
+						// parent_id — служебная ссылка иерархического справочника на
+						// себя (#1819): дальше проверяется как обычный ссылочный реквизит.
+						if targetField == nil && strings.EqualFold(fieldName, metadata.FormChoiceParentField) {
+							targetField = metadata.FormChoiceParentFieldOf(target)
+							if targetField == nil {
+								add("%s: parent_id допустим только у иерархического справочника, а %s не иерархический", where, target.Name)
+								continue
+							}
+						}
 						if targetField == nil {
 							add("%s: у справочника %s нет реквизита %q", where, target.Name, fieldName)
 							continue

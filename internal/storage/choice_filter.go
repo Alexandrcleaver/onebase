@@ -74,7 +74,7 @@ func choicePredicateSQL(d Dialect, entity *metadata.Entity, predicates []ChoiceP
 			continue
 		}
 
-		field := choiceField(entity, fieldName)
+		field, column := choiceField(entity, fieldName)
 		if field == nil {
 			return "", nil, startArg, fmt.Errorf("choice filter %d: field %q does not exist", i, fieldName)
 		}
@@ -88,7 +88,7 @@ func choicePredicateSQL(d Dialect, entity *metadata.Entity, predicates []ChoiceP
 			if predicate.Op != metadata.FormChoiceOpEqual {
 				return "", nil, startArg, fmt.Errorf("choice filter %d: boolean field %q supports only eq", i, fieldName)
 			}
-			parts = append(parts, metadata.ColumnName(*field)+" = "+d.Placeholder(next))
+			parts = append(parts, column+" = "+d.Placeholder(next))
 			args = append(args, value)
 			next++
 			continue
@@ -100,7 +100,6 @@ func choicePredicateSQL(d Dialect, entity *metadata.Entity, predicates []ChoiceP
 		if err != nil {
 			return "", nil, startArg, fmt.Errorf("choice filter %d field %q: %w", i, fieldName, err)
 		}
-		column := metadata.ColumnName(*field)
 		switch predicate.Op {
 		case metadata.FormChoiceOpEqual:
 			parts = append(parts, column+" = "+d.Placeholder(next))
@@ -127,13 +126,22 @@ func choicePredicateSQL(d Dialect, entity *metadata.Entity, predicates []ChoiceP
 	return "(" + strings.Join(parts, " AND ") + ")", args, next, nil
 }
 
-func choiceField(entity *metadata.Entity, name string) *metadata.Field {
+// choiceField возвращает реквизит условия и его колонку. parent_id
+// иерархического справочника — ссылка на тот же справочник в служебной
+// колонке parent_id (#1819): к ней применимы eq и in_hierarchy ссылочного
+// реквизита, и поддерево строится по той же таблице.
+func choiceField(entity *metadata.Entity, name string) (*metadata.Field, string) {
 	for i := range entity.Fields {
 		if strings.EqualFold(entity.Fields[i].Name, name) {
-			return &entity.Fields[i]
+			return &entity.Fields[i], metadata.ColumnName(entity.Fields[i])
 		}
 	}
-	return nil
+	if strings.EqualFold(name, metadata.FormChoiceParentField) {
+		if field := metadata.FormChoiceParentFieldOf(entity); field != nil {
+			return field, "parent_id"
+		}
+	}
+	return nil, ""
 }
 
 func choiceUUID(value any) (uuid.UUID, error) {

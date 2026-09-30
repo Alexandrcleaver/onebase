@@ -295,6 +295,23 @@ const (
 	FormChoiceOpInHierarchy FormChoiceOperator = "in_hierarchy"
 )
 
+// FormChoiceParentField — служебное поле choice_filter иерархического
+// справочника: ссылка записи на родителя в том же справочнике (#1819). К нему
+// применимы операторы ссылочного реквизита: `eq X` — непосредственные дети X,
+// `in_hierarchy X` — записи, чей родитель лежит в поддереве X (сама X
+// включена), то есть записи строго внутри X. У корневых записей родителя нет —
+// они не проходят ни одно из условий.
+const FormChoiceParentField = "parent_id"
+
+// FormChoiceParentFieldOf — parent_id как ссылочный реквизит справочника на
+// самого себя; nil, если справочник не иерархический.
+func FormChoiceParentFieldOf(entity *Entity) *Field {
+	if entity == nil || entity.Kind != KindCatalog || !entity.Hierarchical {
+		return nil
+	}
+	return &Field{Name: FormChoiceParentField, Type: FieldType("reference:" + entity.Name), RefEntity: entity.Name}
+}
+
 // FormChoiceCondition описывает одно серверно проверяемое условие подбора.
 // Ровно одно из From и Value обязательно.
 //
