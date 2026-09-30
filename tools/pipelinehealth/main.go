@@ -815,6 +815,9 @@ func checkContract(result *report, path string) {
 	mergeData, err := readContract(filepath.Join(skillsRoot, "merge-shepherd", "SKILL.md"))
 	if err != nil || !strings.Contains(text, "pp:base-sync-done") ||
 		!strings.Contains(text, "single-flight-барьер") ||
+		!strings.Contains(text, "Позиция edge нового коммита относительно") ||
+		!strings.Contains(text, "доказывай графом") ||
+		strings.Contains(text, "обязан быть ровно одним `PullRequestCommit` после") ||
 		!strings.Contains(string(mergeData), "pp:base-sync-intent") ||
 		!strings.Contains(string(mergeData), "повторный человеческий `ship` при валидной") ||
 		!strings.Contains(string(mergeData), "single-flight-барьер") {
