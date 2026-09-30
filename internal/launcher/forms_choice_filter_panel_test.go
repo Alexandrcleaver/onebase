@@ -10,11 +10,8 @@ import (
 // Execute the panel code from the rendered editor: a server-only round trip
 // cannot catch an operator silently rewritten by the browser before POST.
 func TestFormsEditor_ChoiceFilterEqualOrEmptyPanel(t *testing.T) {
-	_, nodeErr := exec.LookPath("node")
-	if nodeErr != nil {
-		if _, err := exec.LookPath("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc"); err != nil {
-			t.Skip("JavaScript engine is required for the choice filter panel test")
-		}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is required for the choice filter panel test")
 	}
 	page := formsEditorScript(t)
 	start := strings.Index(page, "function addChoiceFilterEditor(panel, info) {")
@@ -78,12 +75,11 @@ equal(secondMode.disabled, true, 'switching to eq_or_empty disables boolean mode
 `
 	// eval the function from the page in the same global scope as its DOM stubs.
 	script := testScript[:strings.Index(testScript, "const panel =")] + "\neval(" + strconv.Quote(page[start:start+end]) + ");\n" + testScript[strings.Index(testScript, "const panel ="):]
-	var cmd *exec.Cmd
-	if nodeErr == nil {
-		cmd = exec.Command("node", "-e", script)
-	} else {
-		cmd = exec.Command("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc", "-e", script)
-	}
+	// The script goes through stdin: the command line stays constant (gosec
+	// G204), and node exits non-zero when the script throws. jsc has no such
+	// mode — it reads stdin as a REPL and exits 0 after an exception.
+	cmd := exec.CommandContext(t.Context(), "node", "-")
+	cmd.Stdin = strings.NewReader(script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("rendered choice filter panel: %v\n%s", err, out)
 	}
