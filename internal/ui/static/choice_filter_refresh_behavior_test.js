@@ -240,3 +240,47 @@ test('choice_dropdown false keeps only the selected option after a source refres
   assert.deepEqual(env.select.options.map((option) => option.value), ['', 'legacy-location']);
   assert.equal(env.select.value, 'legacy-location');
 });
+
+// choice_dropdown: false на owner-only пути — без choice_filter и без
+// choice_folders. Закрытый список обещан закрытым: первые 50 строк ответа — не
+// список, а случайная выборка, и раскрывать его при смене владельца нельзя.
+// Выбирают в таком поле кнопкой подбора, она рядом и никуда не делась.
+test('closed owner-only list stays closed after the owner changes', async () => {
+  const answer = deferred();
+  const env = runtime(() => answer.promise, 'b-1', true, false, true);
+
+  env.api.obRefreshDependentSelects(env.ownerControl);
+  answer.resolve(response({items: [{id: 'b-1', _label: 'B one'}, {id: 'b-2', _label: 'B two'}]}));
+  await new Promise(setImmediate);
+
+  assert.deepEqual(env.select.options.map((option) => option.value), ['', 'b-1']);
+  assert.equal(env.select.value, 'b-1');
+  assert.equal(env.select.options[1].textContent, 'B one');
+});
+
+// Смена владельца может сделать текущее значение чужим. Тогда закрытый список
+// обязан его отпустить, а не хранить ссылку на элемент соседнего владельца.
+test('closed owner-only list drops a value the new owner does not have', async () => {
+  const answer = deferred();
+  const env = runtime(() => answer.promise, 'a-1', true, false, true);
+
+  env.api.obRefreshDependentSelects(env.ownerControl);
+  answer.resolve(response({items: [{id: 'b-1', _label: 'B one'}, {id: 'b-2', _label: 'B two'}]}));
+  await new Promise(setImmediate);
+
+  assert.deepEqual(env.select.options.map((option) => option.value), ['']);
+  assert.equal(env.select.value, '');
+});
+
+// Обычное поле без ключа ведёт себя как прежде: страница ответа видна целиком.
+test('open owner-only list keeps showing the whole page', async () => {
+  const answer = deferred();
+  const env = runtime(() => answer.promise, 'b-1', true, false);
+
+  env.api.obRefreshDependentSelects(env.ownerControl);
+  answer.resolve(response({items: [{id: 'b-1', _label: 'B one'}, {id: 'b-2', _label: 'B two'}]}));
+  await new Promise(setImmediate);
+
+  assert.deepEqual(env.select.options.map((option) => option.value), ['', 'b-1', 'b-2']);
+  assert.equal(env.select.value, 'b-1');
+});
