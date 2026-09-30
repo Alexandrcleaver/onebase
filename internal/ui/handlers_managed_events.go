@@ -1229,6 +1229,9 @@ func (s *Server) handleManagedFormEventMode(w http.ResponseWriter, r *http.Reque
 	choiceFn := newChoiceListBuiltin(&choiceItems)
 	vars["ДобавитьЗначениеСписка"] = choiceFn
 	vars["AddChoiceItem"] = choiceFn
+	if closeInv != nil {
+		disableDialogBuiltinsForClose(vars)
+	}
 
 	condRuntime := newFormConditionalRuntime(form)
 	for k, v := range condRuntime.builtins() {
@@ -2546,6 +2549,9 @@ func (s *Server) handleProcessorFormEventMode(w http.ResponseWriter, r *http.Req
 		choiceFn := newChoiceListBuiltin(&choiceItems)
 		vars["ДобавитьЗначениеСписка"] = choiceFn
 		vars["AddChoiceItem"] = choiceFn
+		if closeInv != nil {
+			disableDialogBuiltinsForClose(vars)
+		}
 
 		condRuntime := newFormConditionalRuntime(form)
 		for k, v := range condRuntime.builtins() {
