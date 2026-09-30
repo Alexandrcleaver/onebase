@@ -1029,7 +1029,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
       // navigate away or repaint those newer edits, even when the handler
       // saved the old snapshot and returned dirty=false.
       if (data.navigation && data.navigation.url && formEditState.revision !== snapshot.editRevision) {
-        window.obSetManagedFormDirty(true);
+        setManagedFormDirty(true);
         var revisionBeforeRead = formEditState.revision;
         var currentBody = null;
         try { currentBody = await closeSnapshotBody('', ''); } catch (_) {}
@@ -1041,7 +1041,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
           (data.messages || []).forEach(m => flash(m, 'ok'));
           if (data.error) flash(data.error, 'err');
         }
-        window.obSetManagedFormDirty(true);
+        setManagedFormDirty(true);
         flash('Форма изменилась во время выполнения команды — переход не выполнен', 'err');
         return;
       }
@@ -1081,7 +1081,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
       // dirty=true is an authoritative safety signal and must survive a
       // partially failing renderer. Programmatic response application does
       // not emit input/change, so raise it before touching mutable DOM state.
-      if (data.dirty === true) window.obSetManagedFormDirty(true);
+      if (data.dirty === true) setManagedFormDirty(true);
       if (Object.prototype.hasOwnProperty.call(data, 'conditionalCss')) applyFormConditionalCSS(data.conditionalCss);
       applyElementStates(data.elementStates);
       window.obManagedApplyTablePartRefOptions(data.tpRefOptions);
@@ -1092,7 +1092,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
 	  // Server events repaint controls programmatically and therefore do not
 	  // trigger input/change. Raise dirty for unsaved handler mutations; clear
 	  // it only when this response proves a successful Object.Write.
-	  if (data.dirty === false && (data.savedId || data.version)) window.obSetManagedFormDirty(false);
+	  if (data.dirty === false && (data.savedId || data.version)) setManagedFormDirty(false);
       (data.messages || []).forEach(m => flash(m, 'ok'));
       if (data.error) flash(data.error, 'err');
       if (navigationBlocked) flash('Форма содержит несохранённые изменения — переход не выполнен', 'err');
@@ -1373,7 +1373,13 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
       }
     } catch (_) {}
   }
-  window.obSetManagedFormDirty = setManagedFormDirty;
+  // Grid operations and native inputs share the same edit clock. Count every
+  // user mutation, even when the form was already dirty. Applying a server
+  // response uses the private setter and does not count as new user input.
+  window.obSetManagedFormDirty = function(dirty){
+    if (dirty) formEditState.revision++;
+    setManagedFormDirty(dirty);
+  };
 
   function applySavedIdentity(data){
     if (!data || typeof data !== 'object') return;
@@ -1881,8 +1887,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
   var _obBaseTitle = document.title;
   setManagedFormDirty(cfg.initialDirty === true);
   function _obMarkDirty(){
-	formEditState.revision++;
-	setManagedFormDirty(true);
+	window.obSetManagedFormDirty(true);
   }
   document.addEventListener('input',  function(e){ if (e.target && e.target.closest && e.target.closest('#main-form')) _obMarkDirty(); }, true);
   document.addEventListener('change', function(e){ if (e.target && e.target.closest && e.target.closest('#main-form')) _obMarkDirty(); }, true);

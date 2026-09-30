@@ -108,26 +108,54 @@ const mergeEnd = source.indexOf('\n  window.obRequestFormClose', mergeStart);
 if ([start, end, fireEnd, helpersStart, helpersEnd, mergeStart, mergeEnd].some(i => i < 0)) {
   throw new Error('managed.js behavior slices not found');
 }
-const fnSource = source.slice(helpersStart, helpersEnd) + source.slice(mergeStart, mergeEnd) +
+const dirtyEnd = source.indexOf('  function applySavedIdentity(data){', helpersEnd);
+const markStart = source.indexOf('  function _obMarkDirty(){');
+const markEnd = source.indexOf('  document.addEventListener', markStart);
+const gridHelpersStart = source.indexOf('  function reindexOrd(items) {');
+const gridHelpersEnd = source.indexOf('  // obGridCopyRow', gridHelpersStart);
+const moveStart = source.indexOf('  window.obGridMoveRow = function(tpName, delta) {');
+const moveEnd = source.indexOf('  function rememberActiveGrid', moveStart);
+if ([dirtyEnd, markStart, markEnd, gridHelpersStart, gridHelpersEnd, moveStart, moveEnd].some(i => i < 0)) {
+  throw new Error('managed.js dirty/grid behavior slices not found');
+}
+const fnSource = source.slice(helpersEnd, dirtyEnd) + source.slice(markStart, markEnd) +
+  source.slice(gridHelpersStart, gridHelpersEnd) + source.slice(moveStart, moveEnd) +
+  source.slice(helpersStart, helpersEnd) + source.slice(mergeStart, mergeEnd) +
   source.slice(start, fireEnd);
 
 async function run(response, formDirty, concurrentEdit) {
   const calls = { assign: [], flash: [], dirty: [], values: [], savedIdentity: 0 };
   const fields = { 'Имя': 'исходное', 'Описание': 'старое' };
   const formEditState = { revision: 0 };
+  let rows = [{ id: 1, _ord: 0, Item: 'first' }, { id: 2, _ord: 1, Item: 'second' }];
+  const bodyNow = () => new URLSearchParams({ ...fields,
+    'tp_json.Items': JSON.stringify(rows.map(r => ({ Item: r.Item }))),
+  });
+  const grid = {
+    dataView: {
+      getItems: () => rows, getItem: i => rows[i], setItems: items => { rows = items; },
+      getRowById: id => rows.findIndex(r => r.id === id),
+    },
+    grid: { getActiveCell: () => ({ row: 1, cell: 0 }), invalidate() {},
+      scrollRowIntoView() {}, setActiveCell() {}, },
+  };
   let fetchEntered, finishFetch;
   const entered = new Promise(resolve => { fetchEntered = resolve; });
   const waiting = new Promise(resolve => { finishFetch = resolve; });
   const win = {
     _obFormDirty: formDirty,
     location: { assign(url) { calls.assign.push(url); } },
-    obSetManagedFormDirty(v) { calls.dirty.push(v); win._obFormDirty = v; },
+    obSetEmbeddedDirty(v) { calls.dirty.push(v); },
+    _obGrids: { Items: grid },
     obManagedApplyTablePartRefOptions() {},
-    applyTableParts() {},
+    applyTableParts(parts) {
+      if (parts && parts.Items) rows = parts.Items.map((r, i) => ({ ...r, id: i + 1, _ord: i }));
+    },
     obOpenQuestion() {},
   };
   const env = {
-    window: win,
+    window: win, document: {}, _obBaseTitle: '',
+    rememberActiveGrid() {}, updateTotals() {},
     reloadRequired: false, formEventWriteUnknown: false, manualReconcileRequired: false,
     formEditState,
     formEventQueue: Promise.resolve(), formEventPendingCount: 0, formEventPending: false,
@@ -135,32 +163,33 @@ async function run(response, formDirty, concurrentEdit) {
     DOC_ID: 'doc', URL: '/ui/form-event',
     fetch: () => { fetchEntered(); return waiting; },
     flash: (m, kind) => calls.flash.push([m, kind]),
-    setManagedFormDirty: (v) => calls.dirty.push(v),
     applySavedIdentity() { calls.savedIdentity++; },
     openItemPicker() {}, applyFormConditionalCSS() {},
     applyElementStates() {}, applyChoiceList() {}, applyFormTables() {},
     applyValues: (v) => { if (v) { calls.values.push(v); Object.assign(fields, v); } },
-    closeSnapshotBody: async () => new URLSearchParams(fields),
+    closeSnapshotBody: async () => bodyNow(),
     captureFormEventSelection() {},
     snapshotFormEvent: async () => ({
-      body: new URLSearchParams(fields), form: null, elementName: 'Открыть',
+      body: bodyNow(), form: null, elementName: 'Открыть',
       extraParams: null, wasNew: false, editRevision: formEditState.revision,
     }),
     refreshQueuedFormEventIdentity() {},
   };
-  const factory = new Function(...Object.keys(env), fnSource + '\nreturn window.obFire;');
+  const factory = new Function(...Object.keys(env), fnSource + '\nwindow.markNativeEdit = _obMarkDirty; return window.obFire;');
   const fire = factory(...Object.values(env));
   const pending = fire('Открыть', 'Нажатие');
   await entered;
-  if (concurrentEdit) {
+  if (concurrentEdit === 'grid') {
+    win.obGridMoveRow('Items', -1);
+  } else if (concurrentEdit) {
     fields['Имя'] = 'ввод пользователя';
-    formEditState.revision++;
-    win._obFormDirty = true;
+    win.markNativeEdit();
   }
   finishFetch({ ok: true, json: async () => response });
   await pending;
   calls.fields = fields;
   calls.isDirty = win._obFormDirty;
+  calls.rowOrder = rows.map(r => r.Item);
   return calls;
 }
 
@@ -205,6 +234,18 @@ const blocked = 'Форма содержит несохранённые изме
   check(c.assign.length === 0, 'запись старого snapshot разрешила переход: ' + JSON.stringify(c));
   check(c.fields['Имя'] === 'ввод пользователя' && c.isDirty, 'поздний ввод потерян: ' + JSON.stringify(c));
   check(c.savedIdentity === 1, 'новая версия записи не принята: ' + JSON.stringify(c));
+  // SlickGrid's structural operations raise dirty without native input/change.
+  // Both a saved old snapshot and an unsaved response must preserve the new order.
+  for (const dirty of [false, true]) {
+    c = await run({ ok: true, dirty, version: 2, navigation: nav,
+      tableparts: { Items: [{ Item: 'first' }, { Item: 'second' }] },
+      values: { 'Описание': 'изменил обработчик' } }, true, 'grid');
+    check(c.assign.length === 0, 'переход потерял перестановку строки: ' + JSON.stringify(c));
+    check(c.rowOrder.join(',') === 'second,first', 'ответ затёр порядок строк: ' + JSON.stringify(c));
+    check(c.isDirty, 'переставленная таблица должна остаться несохранённой: ' + JSON.stringify(c));
+    check(c.fields['Описание'] === 'изменил обработчик', 'независимое поле не применено после перестановки: ' + JSON.stringify(c));
+    check(c.savedIdentity === 1, 'версия ответа не принята после перестановки: ' + JSON.stringify(c));
+  }
   console.log('ok');
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
 `
