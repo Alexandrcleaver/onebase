@@ -163,6 +163,11 @@ async function run(response, formDirty, concurrentEdit) {
     DOC_ID: 'doc', URL: '/ui/form-event',
     fetch: () => { fetchEntered(); return waiting; },
     flash: (m, kind) => calls.flash.push([m, kind]),
+    // Тексты сообщений приходят из конфига формы (closeMessages), а здесь
+    // конфига нет: стенд вырезает из managed.js только логику события. Отдаём
+    // фолбэк — этому тесту важен факт сообщения, а локализацию проверяет
+    // TestManagedFormNavigationMessagesLocalized на рендере формы.
+    closeMessage: (name, fallback) => fallback,
     applySavedIdentity() { calls.savedIdentity++; },
     openItemPicker() {}, applyFormConditionalCSS() {},
     applyElementStates() {}, applyChoiceList() {}, applyFormTables() {},
