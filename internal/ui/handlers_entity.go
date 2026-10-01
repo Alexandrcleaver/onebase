@@ -645,7 +645,7 @@ func formatDateValueForInput(v any) string {
 // Возвращает имена отброшенных полей — по ним удобно писать тесты и, при
 // необходимости, журналировать попытку.
 func dropAdminOnlyFields(form *metadata.FormModule, fields map[string]any, admin bool) []string {
-	if form == nil || admin || len(fields) == 0 {
+	if form == nil || admin {
 		return nil
 	}
 	var dropped []string
@@ -657,15 +657,46 @@ func dropAdminOnlyFields(form *metadata.FormModule, fields map[string]any, admin
 		if name == "" {
 			return true
 		}
+		found := false
 		for key := range fields {
 			if strings.EqualFold(key, name) {
 				delete(fields, key)
 				dropped = append(dropped, key)
+				found = true
 			}
+		}
+		// Служебный ключ объекта (parent_id, is_folder) в entity.Fields не
+		// объявлен: formToFields его не приносит, и удалять в карте нечего.
+		// Вернуть его всё равно обязаны — иначе подделанное значение доедет до
+		// объекта следующим mergeSubmittedEntityServiceFields, и запрет, который
+		// форма показала запертым контролом, снимался бы обычным POST
+		// неадминистратора. Запрет серверный: disabled в браузере защитой не
+		// считается.
+		if !found && isEntityServiceFormKey(name) {
+			dropped = append(dropped, name)
 		}
 		return true
 	})
 	return dropped
+}
+
+// entityServiceFormKeys — служебные ключи объекта, которые submit принимает из
+// формы помимо entity.Fields: их переносит mergeSubmittedEntityServiceFields.
+// Список один и тот же для переноса и для серверного запрета — иначе
+// editable_admin_only разъехался бы с тем, что форма реально принимает, и
+// запрет на одном ключе молча не действовал бы.
+var entityServiceFormKeys = []string{"parent_id", "is_folder"}
+
+// isEntityServiceFormKey — имя элемента формы совпало со служебным ключом
+// объекта. Регистронезависимо: data_path пишут и «Объект.parent_id», и
+// «Объект.Parent_ID».
+func isEntityServiceFormKey(name string) bool {
+	for _, key := range entityServiceFormKeys {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // removeSubmittedFormFields removes rejected values from every parsed POST map.
@@ -824,11 +855,16 @@ func mergeSubmittedEntityServiceFields(r *http.Request, entity *metadata.Entity,
 		return
 	}
 	submitted := submittedFormKeys(r)
-	if formKeySubmitted(submitted, "parent_id") {
-		fields["parent_id"] = r.FormValue("parent_id") //nolint:gosec // caller applies the entity-specific body limit
-	}
-	if formKeySubmitted(submitted, "is_folder") {
-		fields["is_folder"] = r.FormValue("is_folder") == "true" //nolint:gosec // caller applies the entity-specific body limit
+	for _, key := range entityServiceFormKeys {
+		if !formKeySubmitted(submitted, key) {
+			continue
+		}
+		switch key {
+		case "parent_id":
+			fields[key] = r.FormValue(key) //nolint:gosec // caller applies the entity-specific body limit
+		case "is_folder":
+			fields[key] = r.FormValue(key) == "true" //nolint:gosec // caller applies the entity-specific body limit
+		}
 	}
 }
 

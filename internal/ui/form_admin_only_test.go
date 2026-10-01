@@ -361,3 +361,191 @@ func storedByName(t *testing.T, srv *Server, ent *metadata.Entity, name string) 
 	t.Fatalf("запись %q не сохранилась: %+v", name, rows)
 	return nil
 }
+
+// adminOnlyHierarchyFixture — иерархический справочник, у которого запертыми
+// объявлены служебные ключи объекта: parent_id и is_folder. В entity.Fields их
+// нет, поэтому formToFields их не приносит, а переносит отдельный
+// mergeSubmittedEntityServiceFields — мимо которого запрет и обходился.
+func adminOnlyHierarchyFixture(t *testing.T) (srv *Server, ent *metadata.Entity, groupA, groupB, item uuid.UUID) {
+	t.Helper()
+	form := managedObjectForm(
+		fieldEl("ПолеНаименование", "Объект.Наименование"),
+		&metadata.FormElement{
+			Kind: metadata.FormElementField, Name: "ПолеРодитель", DataPath: "Объект.parent_id",
+			EditableAdminOnly: true,
+		},
+		&metadata.FormElement{
+			Kind: metadata.FormElementField, Name: "ПолеГруппа", DataPath: "Объект.is_folder",
+			EditableAdminOnly: true,
+		},
+	)
+	ent = &metadata.Entity{
+		Name: "Папки", Kind: metadata.KindCatalog, Hierarchical: true,
+		Fields: []metadata.Field{
+			{Name: "Наименование", Type: metadata.FieldTypeString},
+			{Name: "Комментарий", Type: metadata.FieldTypeString},
+		},
+		Forms: []*metadata.FormModule{form},
+	}
+	srv, ctx := newSubmitTestServer(t, []*metadata.Entity{ent})
+	srv.authRepo = auth.NewRepo(srv.store)
+	groupA, groupB, item = uuid.New(), uuid.New(), uuid.New()
+	for id, name := range map[uuid.UUID]string{groupA: "группа А", groupB: "группа Б"} {
+		if err := srv.store.Upsert(ctx, ent.Name, id, map[string]any{
+			"Наименование": name, "is_folder": true,
+		}, ent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := srv.store.Upsert(ctx, ent.Name, item, map[string]any{
+		"Наименование": "элемент", "Комментарий": "исходно",
+		"parent_id": groupA.String(), "is_folder": false,
+	}, ent); err != nil {
+		t.Fatal(err)
+	}
+	return srv, ent, groupA, groupB, item
+}
+
+func submitHierarchyEdit(t *testing.T, srv *Server, ent *metadata.Entity, id uuid.UUID, body url.Values, user *auth.User) *httptest.ResponseRecorder {
+	t.Helper()
+	req := reqWithChi(http.MethodPost, "/ui/catalog/"+ent.Name+"/"+id.String(), body,
+		map[string]string{"entity": ent.Name, "id": id.String()})
+	req = req.WithContext(auth.ContextWithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+	srv.submitEdit(rec, req)
+	return rec
+}
+
+// Главный случай: обычный пользователь подделывает служебные ключи обычным
+// публичным submit существующего элемента. Проверка формы такое размещение
+// принимает, разметка поле запирает — но запрет обязан держать сервер. Раньше
+// dropAdminOnlyFields видел только карту полей сущности, parent_id оставался в
+// POST, и следующий mergeSubmittedEntityServiceFields переносил подделанное
+// значение в сохраняемый объект: элемент менял родителя.
+func TestEditableAdminOnlyKeepsHierarchyKeysOnForgedSubmit(t *testing.T) {
+	srv, ent, groupA, groupB, item := adminOnlyHierarchyFixture(t)
+
+	rec := submitHierarchyEdit(t, srv, ent, item, url.Values{
+		"Наименование": {"элемент"},
+		"Комментарий":  {"правка оператора"},
+		"parent_id":    {groupB.String()},
+		"is_folder":    {"true"},
+	}, adminOnlyOperator(ent.Name))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("запись не прошла: %d %s", rec.Code, rec.Body.String())
+	}
+
+	row, err := srv.store.GetByID(t.Context(), ent.Name, item, ent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := refValueString(row["parent_id"]); got != groupA.String() {
+		t.Fatalf("подделанный parent_id записался: %q, ожидалась прежняя группа %s", got, groupA)
+	}
+	if asBool(row["is_folder"]) {
+		t.Fatal("подделанный is_folder записался: элемент стал группой")
+	}
+	// Запрет адресный: соседнее поле той же формы записалось как обычно.
+	if got := fmt.Sprint(row["Комментарий"]); got != "правка оператора" {
+		t.Fatalf("обычное поле не записалось: %q", got)
+	}
+
+	// Администратору те же ключи доступны — иначе «запрет» стал бы отказом всем.
+	rec = submitHierarchyEdit(t, srv, ent, item, url.Values{
+		"Наименование": {"элемент"},
+		"Комментарий":  {"правка администратора"},
+		"parent_id":    {groupB.String()},
+		"is_folder":    {"true"},
+	}, &auth.User{Login: "root", IsAdmin: true})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("админская запись не прошла: %d %s", rec.Code, rec.Body.String())
+	}
+	row, err = srv.store.GetByID(t.Context(), ent.Name, item, ent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := refValueString(row["parent_id"]); got != groupB.String() {
+		t.Fatalf("администратор не смог перенести элемент: parent_id = %q", got)
+	}
+	if !asBool(row["is_folder"]) {
+		t.Fatal("администратор не смог сделать элемент группой")
+	}
+}
+
+// Обратная сторона запрета: без editable_admin_only служебные ключи обычного
+// пользователя обязаны доезжать до записи. Иначе fail-closed превратился бы в
+// «иерархию не меняет никто» и сломал обычный перенос элемента по группам.
+func TestHierarchyKeysStayEditableWithoutAdminOnly(t *testing.T) {
+	form := managedObjectForm(
+		fieldEl("ПолеНаименование", "Объект.Наименование"),
+		fieldEl("ПолеРодитель", "Объект.parent_id"),
+	)
+	ent := &metadata.Entity{
+		Name: "Папки", Kind: metadata.KindCatalog, Hierarchical: true,
+		Fields: []metadata.Field{{Name: "Наименование", Type: metadata.FieldTypeString}},
+		Forms:  []*metadata.FormModule{form},
+	}
+	srv, ctx := newSubmitTestServer(t, []*metadata.Entity{ent})
+	srv.authRepo = auth.NewRepo(srv.store)
+	groupB, item := uuid.New(), uuid.New()
+	if err := srv.store.Upsert(ctx, ent.Name, groupB, map[string]any{
+		"Наименование": "группа Б", "is_folder": true,
+	}, ent); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.Upsert(ctx, ent.Name, item, map[string]any{
+		"Наименование": "элемент", "is_folder": false,
+	}, ent); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := submitHierarchyEdit(t, srv, ent, item, url.Values{
+		"Наименование": {"элемент"},
+		"parent_id":    {groupB.String()},
+		"is_folder":    {"false"},
+	}, adminOnlyOperator(ent.Name))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("запись не прошла: %d %s", rec.Code, rec.Body.String())
+	}
+	row, err := srv.store.GetByID(t.Context(), ent.Name, item, ent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := refValueString(row["parent_id"]); got != groupB.String() {
+		t.Fatalf("обычный перенос элемента не сработал: parent_id = %q, ожидалась %s", got, groupB)
+	}
+}
+
+// Список служебных ключей — один для переноса и для запрета. Если
+// mergeSubmittedEntityServiceFields научат новому ключу, а entityServiceFormKeys
+// забудут, запрет на нём молча перестанет действовать — этот тест ловит
+// расхождение по факту: каждый ключ из списка доезжает до объекта и каждый
+// отбирается серверным запретом.
+func TestEntityServiceFormKeysMatchServerGuard(t *testing.T) {
+	ent := &metadata.Entity{
+		Name: "Папки", Kind: metadata.KindCatalog, Hierarchical: true,
+		Fields: []metadata.Field{{Name: "Наименование", Type: metadata.FieldTypeString}},
+	}
+	for _, key := range entityServiceFormKeys {
+		body := url.Values{"Наименование": {"элемент"}, key: {"true"}}
+		req := reqWithChi(http.MethodPost, "/ui/catalog/"+ent.Name, body, nil)
+		if err := req.ParseForm(); err != nil {
+			t.Fatalf("%s: разбор формы: %v", key, err)
+		}
+
+		fields := map[string]any{}
+		mergeSubmittedEntityServiceFields(req, ent, fields)
+		if _, ok := fields[key]; !ok {
+			t.Errorf("%s: в списке есть, а merge его не переносит", key)
+		}
+
+		form := managedObjectForm(&metadata.FormElement{
+			Kind: metadata.FormElementField, Name: "Поле" + key, DataPath: "Объект." + key,
+			EditableAdminOnly: true,
+		})
+		dropped := dropAdminOnlyFields(form, map[string]any{}, false)
+		if len(dropped) != 1 || !strings.EqualFold(dropped[0], key) {
+			t.Errorf("%s: серверный запрет его не отбирает (dropped = %v)", key, dropped)
+		}
+	}
+}
