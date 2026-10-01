@@ -456,13 +456,18 @@ var periodicityLevels = map[string]string{
 func periodTruncSQL(level string, d storage.Dialect) string {
 	switch d.Name() {
 	case "sqlite":
-		// p — нормализованное представление period для функций дат SQLite.
-		// Берём первые 19 символов (`YYYY-MM-DD HH:MM:SS`), что отсекает хвост
-		// таймзоны вида ` +0300 MSK`, который мог попасть в старые базы (см.
-		// storage.sqliteTimeLayout): без этого strftime/date вернули бы NULL и
-		// группировка по периоду молча схлопнулась бы. Для новых, уже ISO-данных
-		// substr — это no-op.
-		p := "substr(period,1,19)"
+		// p — местные стенные часы period для функций дат SQLite. Хранится
+		// period в UTC (storage.sqliteTimeLayout), и без перевода движение в
+		// 01:30 по Москве 1 октября попадало в сентябрьскую корзину, хотя
+		// Месяц(Период) того же запроса (#1409) и PostgreSQL (зона сессии —
+		// зона приложения) относят его к октябрю. Перевод — та же
+		// ob_local_datetime, что у календарных функций.
+		//
+		// Запасной путь — первые 19 символов (`YYYY-MM-DD HH:MM:SS`): старые
+		// базы могли хранить Go-строку с хвостом ` +0300 MSK`, которую
+		// ob_local_datetime не разбирает; её стенные часы и так местные, а без
+		// среза strftime/date вернули бы NULL и группировка молча схлопнулась бы.
+		p := "COALESCE(ob_local_datetime(period), substr(period,1,19))"
 		switch level {
 		case "day":
 			return "date(" + p + ")"

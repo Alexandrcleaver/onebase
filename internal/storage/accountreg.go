@@ -357,10 +357,9 @@ ORDER BY a.code`, selectCols, table, d.Placeholder(1), d.Placeholder(2), groupBy
 		// стоял float64, из-за чего PostgreSQL терял точность NUMERIC уже на
 		// стороне Go — сумма приходила округлённой в отчёт и, что хуже, в опорные
 		// проводки свёртки (accountOpeningRows).
-		// Оговорка: на SQLite точность всё равно ограничена движком — SUM() над
-		// TEXT-колонкой возвращает float64 при любом CAST (NUMERIC/DECIMAL), так
-		// что там decimal лишь сохраняет то, что отдал SQL, без второго
-		// округления. Точный агрегат на SQLite потребовал бы суммирования в Go.
+		// На SQLite SUM() тоже точный: встроенный sum() перекрыт десятичным
+		// агрегатом (sqlite_sum.go), и сумма приходит как ближайший к точному
+		// значению double — decimal здесь сохраняет её без второго округления.
 		for range resourceCols {
 			var v any
 			dests = append(dests, &v)
