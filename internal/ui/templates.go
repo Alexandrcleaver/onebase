@@ -1346,6 +1346,10 @@ aside details.navsec>summary::-webkit-details-marker{display:none}
 aside details.navsec>summary::before{content:"\25B8";display:inline-block;width:1em;color:#64748b}
 aside details.navsec[open]>summary::before{content:"\25BE"}
 aside details.navsec>summary:hover{color:#cbd5e1}
+aside details.navfolder{margin-left:12px}
+aside details.navfolder>summary{text-transform:none;font-size:12px;margin-top:8px}
+aside .navfolder-title{margin-left:12px;text-transform:none}
+aside .navfolder-items>a{padding-left:26px}
 main{flex:1;padding:28px;overflow-y:auto;min-height:0;min-width:0}
 h2{font-size:22px;font-weight:600;margin-bottom:20px;color:#1e293b}
 h3{font-size:16px;font-weight:600;margin:24px 0 10px;color:#1e293b}
@@ -1616,20 +1620,30 @@ const tplNav = `
   {{if not .Subsystems}}<a href="/ui/" style="display:block;padding:12px 14px 8px;color:#7dd3fc;font-weight:700;font-size:15px;text-decoration:none">{{t $.Lang "Главная"}}</a>{{end}}
   {{if .CollapsibleNav}}
   {{range .Nav}}
-  <details class="navsec" data-navsec="{{.Kind}}"{{if .Open}} open{{end}}>
-    <summary>{{.Kind}}</summary>
-    {{range .Items}}<a href="{{.URL}}" title="{{.Label}}">{{navLabel .Label}}</a>
+  <details class="navsec" id="{{.DOMID}}" data-nav-id="{{.ID}}" data-navsec="{{.DOMID}}"{{if .LegacyTitle}} data-navsec-legacy="{{.LegacyTitle}}"{{end}}{{if .Open}} open{{end}}>
+    <summary>{{lucideIcon .Icon}}{{.Kind}}</summary>
+    {{template "nav-items" .Items}}
+    {{range .Groups}}
+    <details class="navsec navfolder" id="{{.DOMID}}" data-nav-id="{{.ID}}" data-navsec="{{.DOMID}}">
+      <summary>{{lucideIcon .Icon}}{{.Kind}}</summary>
+      {{template "nav-items" .Items}}
+    </details>
     {{end}}
   </details>
   {{end}}
   {{else}}
   {{range .Nav}}
-  <div class="sec">{{.Kind}}</div>
-  {{range .Items}}<a href="{{.URL}}" title="{{.Label}}">{{navLabel .Label}}</a>
+  <div class="sec" id="{{.DOMID}}" data-nav-id="{{.ID}}">{{lucideIcon .Icon}}{{.Kind}}</div>
+  {{template "nav-items" .Items}}
+  {{range .Groups}}
+  <div class="sec navfolder-title" id="{{.DOMID}}" data-nav-id="{{.ID}}">{{lucideIcon .Icon}}{{.Kind}}</div>
+  <div class="navfolder-items">{{template "nav-items" .Items}}</div>
   {{end}}{{end}}
   {{end}}
 </aside>
 {{end}}
+{{define "nav-items"}}{{range .}}<a href="{{.URL}}" title="{{.Label}}" id="{{.DOMID}}" data-nav-id="{{.ID}}">{{lucideIcon .Icon}}{{navLabel .Label}}</a>
+{{end}}{{end}}
 `
 
 const tplIndex = `
@@ -1836,7 +1850,10 @@ const tplList = `
     <div class="view-switch">
       {{/* Переключение вида меняет только вид: поиск, отбор и сортировка
            остаются — их сбрасывает лишь явная очистка. */}}
-      <a class="view-btn{{if and (not .TreeView) (not .TilesView)}} active{{end}}" href="{{listURL $.Query "view" ""}}" title="{{t $.Lang "Список"}}">☰</a>
+      {{/* «Список» — явный выбор, как и «Плитка»: без параметра вид берётся из
+           сохранённого выбора пользователя (#1485), и из плитки вернуться было
+           бы нельзя. */}}
+      <a class="view-btn{{if and (not .TreeView) (not .TilesView)}} active{{end}}" href="{{listURL $.Query "view" "list"}}" title="{{t $.Lang "Список"}}">☰</a>
       <a class="view-btn{{if .TilesView}} active{{end}}" href="{{listURL $.Query "view" "tiles"}}" title="{{t $.Lang "Плитка"}}">▦</a>
       {{if .Entity.Hierarchical}}<a class="view-btn{{if .TreeView}} active{{end}}" href="?view=tree{{if $.CurrentSubsystem}}&subsystem={{$.CurrentSubsystem}}{{end}}" title="{{t $.Lang "Дерево"}}">📂</a>{{end}}
     </div>
@@ -2329,7 +2346,7 @@ const tplForm = `
       {{end}}
     </select>
   {{else if eq (str .Type) "date"}}
-    <input type="datetime-local" name="{{$fn}}" value="{{index $.Values $fn}}"{{if $ro}} readonly{{end}}>
+    <input type="datetime-local" step="1" name="{{$fn}}" value="{{index $.Values $fn}}"{{if $ro}} readonly{{end}}>
   {{else if eq (str .Type) "bool"}}
     {{if $ro}}<input type="hidden" name="{{$fn}}" value="{{index $.Values $fn}}">{{end}}
     <select{{if not $ro}} name="{{$fn}}"{{end}}{{if $ro}} disabled{{end}}>

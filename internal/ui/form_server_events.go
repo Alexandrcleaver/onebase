@@ -299,6 +299,7 @@ func (s *Server) runAfterWriteFormHook(ctx context.Context, entity *metadata.Ent
 	if err != nil {
 		return
 	}
+	setPersistedFormSelfRef(entity, obj)
 	if err := s.runFormWriteHook(ctx, entity, form, obj, metadata.FormEventAfterWrite, msgs); err != nil && msgs != nil {
 		*msgs = append(*msgs, "ПослеЗаписи: "+err.Error())
 	}
