@@ -68,6 +68,7 @@ func CheckLintProject(dir string, proj *project.Project, roles []*auth.Role) []I
 	issues = append(issues, CheckLintIndexes(proj)...)
 	issues = append(issues, CheckLintReports(proj)...)
 	issues = append(issues, CheckLintFormAttrTypes(proj)...)
+	issues = append(issues, checkNavigation(proj, true)...)
 	return issues
 }
 
@@ -402,6 +403,8 @@ func entityYAMLSchema() *yamlLintSchema {
 	})
 	return with(obj(
 		"name", "title", "description", "posting", "hierarchical", "hierarchy_kind",
+		// owner — справочник-владелец (подчинённый справочник, 1С «Владелец»).
+		"owner",
 		"presentation", "order_by", "choice_preview", "choice_preview_proc",
 		"list_form", "item_form", "based_on", "list_mode", "notify_changes", "list_refresh_on",
 		"fulltext", "search_fields", "detail_panel",
@@ -573,6 +576,7 @@ func subsystemYAMLSchema() *yamlLintSchema {
 		"titles":    freeMap(),
 		"contents":  contents,
 		"home_page": homePageYAMLSchema(),
+		"menu":      menuYAMLSchema(),
 	})
 }
 
@@ -606,6 +610,7 @@ func homePageYAMLSchema() *yamlLintSchema {
 		"rows":    seq(obj("widgets")),
 		"widgets": seq(obj("name", "span")),
 		"nav":     nav,
+		"menu":    menuYAMLSchema(),
 	})
 }
 
@@ -625,6 +630,9 @@ func formModuleYAMLSchema() *yamlLintSchema {
 	} {
 		element.keys[k] = nil
 	}
+	// choice_filter — «реквизит выбираемого справочника → путь к значению»
+	// (связи параметров выбора), тоже свободная карта.
+	element.keys["choice_filter"] = freeMap()
 	// choice_context — карта «параметр → путь к значению», а не скаляр: состав
 	// ключей свободный, поэтому freeMap, иначе линт ругался бы на каждое имя
 	// параметра.
@@ -2224,4 +2232,11 @@ func sourceLabelForToken(fallback string, tok token.Token) string {
 
 func tokenKey(tok token.Token) string {
 	return fmt.Sprintf("%s:%d:%d:%s", tok.File, tok.Line, tok.Col, strings.ToLower(tok.Literal))
+}
+
+func menuYAMLSchema() *yamlLintSchema {
+	item := with(obj("id", "target", "title", "icon"), map[string]*yamlLintSchema{"titles": freeMap()})
+	group := with(obj("id", "title", "icon"), map[string]*yamlLintSchema{"titles": freeMap(), "items": seq(item)})
+	section := with(obj("id", "title", "icon"), map[string]*yamlLintSchema{"titles": freeMap(), "items": seq(item), "groups": seq(group)})
+	return with(obj(), map[string]*yamlLintSchema{"sections": seq(section)})
 }

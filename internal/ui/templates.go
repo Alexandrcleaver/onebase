@@ -26,6 +26,7 @@ type managedTPColumnJSON struct {
 	Name        string `json:"name"`
 	Type        string `json:"type"`
 	Ref         string `json:"ref,omitempty"`
+	RefFilter   string `json:"refFilter,omitempty"`
 	AllowCreate bool   `json:"allowCreate,omitempty"`
 	Enum        bool   `json:"enum,omitempty"`
 	// Virtual — колонка показывается, но не хранится (#845). Флаг нужен клиенту:
@@ -1066,7 +1067,8 @@ func templateFuncs(bundle *i18n.Bundle) template.FuncMap {
 			}
 			return template.JS(b) //nolint:gosec // G203: JSON сформирован encoding/json
 		},
-		"managedTPColumnsJSON": func(plan []managedTPColumn, virtual []metadata.FormVirtualColumn, lang string, refWriteAccess any) template.JS {
+		"managedTPColumnsJSON": func(plan []managedTPColumn, virtual []metadata.FormVirtualColumn, lang string, refWriteAccess any, tpName string, refFilters any) template.JS {
+			filters, _ := refFilters.(map[string]string)
 			fields := make([]metadata.Field, 0, len(plan))
 			for _, column := range plan {
 				fields = append(fields, column.Field)
@@ -1080,6 +1082,7 @@ func templateFuncs(bundle *i18n.Bundle) template.FuncMap {
 					Name:        field.DisplayName(lang),
 					Type:        string(field.Type),
 					Ref:         field.RefEntity,
+					RefFilter:   filters[tpName+"."+field.Name],
 					AllowCreate: field.RefEntity != "" && field.InlineCreateEnabled(true) && refWriteAllowed(refWriteAccess, field.RefEntity),
 					Enum:        strings.HasPrefix(string(field.Type), "enum:"),
 					Hidden:      column.Hidden,
@@ -1267,6 +1270,7 @@ const tplHead = `
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="onebase">
 <title>{{if .Cfg.AppName}}{{.Cfg.AppName}}{{else}}onebase{{end}}</title>
+{{with $.Lang}}<script>window.OB_I18N = {"Ничего не найдено": {{t . "Ничего не найдено"}}};</script>{{end}}
 <script type="application/json" id="ob-ui-messages">{{jsJSON (dict
   "closeNotConfirmed" (t (or $.Lang "ru") "Форма не закрыта: сервер не подтвердил закрытие.")
   "unsavedClose" (t (or $.Lang "ru") "Данные были изменены и не записаны. Закрыть форму?")
@@ -1342,6 +1346,10 @@ aside details.navsec>summary::-webkit-details-marker{display:none}
 aside details.navsec>summary::before{content:"\25B8";display:inline-block;width:1em;color:#64748b}
 aside details.navsec[open]>summary::before{content:"\25BE"}
 aside details.navsec>summary:hover{color:#cbd5e1}
+aside details.navfolder{margin-left:12px}
+aside details.navfolder>summary{text-transform:none;font-size:12px;margin-top:8px}
+aside .navfolder-title{margin-left:12px;text-transform:none}
+aside .navfolder-items>a{padding-left:26px}
 main{flex:1;padding:28px;overflow-y:auto;min-height:0;min-width:0}
 h2{font-size:22px;font-weight:600;margin-bottom:20px;color:#1e293b}
 h3{font-size:16px;font-weight:600;margin:24px 0 10px;color:#1e293b}
@@ -1612,20 +1620,30 @@ const tplNav = `
   {{if not .Subsystems}}<a href="/ui/" style="display:block;padding:12px 14px 8px;color:#7dd3fc;font-weight:700;font-size:15px;text-decoration:none">{{t $.Lang "Главная"}}</a>{{end}}
   {{if .CollapsibleNav}}
   {{range .Nav}}
-  <details class="navsec" data-navsec="{{.Kind}}"{{if .Open}} open{{end}}>
-    <summary>{{.Kind}}</summary>
-    {{range .Items}}<a href="{{.URL}}" title="{{.Label}}">{{navLabel .Label}}</a>
+  <details class="navsec" id="{{.DOMID}}" data-nav-id="{{.ID}}" data-navsec="{{.DOMID}}"{{if .LegacyTitle}} data-navsec-legacy="{{.LegacyTitle}}"{{end}}{{if .Open}} open{{end}}>
+    <summary>{{lucideIcon .Icon}}{{.Kind}}</summary>
+    {{template "nav-items" .Items}}
+    {{range .Groups}}
+    <details class="navsec navfolder" id="{{.DOMID}}" data-nav-id="{{.ID}}" data-navsec="{{.DOMID}}">
+      <summary>{{lucideIcon .Icon}}{{.Kind}}</summary>
+      {{template "nav-items" .Items}}
+    </details>
     {{end}}
   </details>
   {{end}}
   {{else}}
   {{range .Nav}}
-  <div class="sec">{{.Kind}}</div>
-  {{range .Items}}<a href="{{.URL}}" title="{{.Label}}">{{navLabel .Label}}</a>
+  <div class="sec" id="{{.DOMID}}" data-nav-id="{{.ID}}">{{lucideIcon .Icon}}{{.Kind}}</div>
+  {{template "nav-items" .Items}}
+  {{range .Groups}}
+  <div class="sec navfolder-title" id="{{.DOMID}}" data-nav-id="{{.ID}}">{{lucideIcon .Icon}}{{.Kind}}</div>
+  <div class="navfolder-items">{{template "nav-items" .Items}}</div>
   {{end}}{{end}}
   {{end}}
 </aside>
 {{end}}
+{{define "nav-items"}}{{range .}}<a href="{{.URL}}" title="{{.Label}}" id="{{.DOMID}}" data-nav-id="{{.ID}}">{{lucideIcon .Icon}}{{navLabel .Label}}</a>
+{{end}}{{end}}
 `
 
 const tplIndex = `
@@ -1832,7 +1850,10 @@ const tplList = `
     <div class="view-switch">
       {{/* Переключение вида меняет только вид: поиск, отбор и сортировка
            остаются — их сбрасывает лишь явная очистка. */}}
-      <a class="view-btn{{if and (not .TreeView) (not .TilesView)}} active{{end}}" href="{{listURL $.Query "view" ""}}" title="{{t $.Lang "Список"}}">☰</a>
+      {{/* «Список» — явный выбор, как и «Плитка»: без параметра вид берётся из
+           сохранённого выбора пользователя (#1485), и из плитки вернуться было
+           бы нельзя. */}}
+      <a class="view-btn{{if and (not .TreeView) (not .TilesView)}} active{{end}}" href="{{listURL $.Query "view" "list"}}" title="{{t $.Lang "Список"}}">☰</a>
       <a class="view-btn{{if .TilesView}} active{{end}}" href="{{listURL $.Query "view" "tiles"}}" title="{{t $.Lang "Плитка"}}">▦</a>
       {{if .Entity.Hierarchical}}<a class="view-btn{{if .TreeView}} active{{end}}" href="?view=tree{{if $.CurrentSubsystem}}&subsystem={{$.CurrentSubsystem}}{{end}}" title="{{t $.Lang "Дерево"}}">📂</a>{{end}}
     </div>
@@ -2305,7 +2326,7 @@ const tplForm = `
   {{if isRef (str .Type)}}
     <div style="display:flex;gap:6px;align-items:center">
       {{if $ro}}<input type="hidden" name="{{$fn}}" value="{{index $.Values $fn}}">{{end}}
-      <select id="ref-{{$fn}}"{{if not $ro}} name="{{$fn}}"{{end}} style="flex:1" data-ref-entity="{{.RefEntity}}"{{if and (not $ro) (.InlineCreateEnabled false) (refWriteAllowed $.RefWriteAccess .RefEntity)}} data-ref-allow-create="1"{{end}}{{if $ro}} disabled{{end}}>
+      <select id="ref-{{$fn}}"{{if not $ro}} name="{{$fn}}"{{end}} style="flex:1" data-ref-entity="{{.RefEntity}}"{{if $.RefFilter}}{{with index $.RefFilter $fn}} data-ref-filter="{{.}}"{{end}}{{end}}{{if and (not $ro) (.InlineCreateEnabled false) (refWriteAllowed $.RefWriteAccess .RefEntity)}} data-ref-allow-create="1"{{end}}{{if $ro}} disabled{{end}}>
         <option value="">{{t $.Lang "— выбрать —"}}</option>
         {{range index $.RefOptions $fn}}
         <option value="{{index . "id"}}" {{if eq (index . "id") (index $.Values $fn)}}selected{{end}}>{{index . "_label"}}</option>
@@ -2325,7 +2346,7 @@ const tplForm = `
       {{end}}
     </select>
   {{else if eq (str .Type) "date"}}
-    <input type="datetime-local" name="{{$fn}}" value="{{index $.Values $fn}}"{{if $ro}} readonly{{end}}>
+    <input type="datetime-local" step="1" name="{{$fn}}" value="{{index $.Values $fn}}"{{if $ro}} readonly{{end}}>
   {{else if eq (str .Type) "bool"}}
     {{if $ro}}<input type="hidden" name="{{$fn}}" value="{{index $.Values $fn}}">{{end}}
     <select{{if not $ro}} name="{{$fn}}"{{end}}{{if $ro}} disabled{{end}}>
@@ -2379,7 +2400,7 @@ const tplForm = `
         <td>
         {{if isRef (str .Type)}}
           <div style="display:flex;gap:4px;align-items:center">
-            <select name="tp.{{$tpName}}.{{$i}}.{{$fn}}" style="flex:1" data-ref-entity="{{.RefEntity}}"{{if and (.InlineCreateEnabled true) (refWriteAllowed $.RefWriteAccess .RefEntity)}} data-ref-allow-create="1"{{end}}{{if $tpReadOnly}} disabled{{end}}>
+            <select name="tp.{{$tpName}}.{{$i}}.{{$fn}}" style="flex:1" data-ref-entity="{{.RefEntity}}"{{if $.RefFilter}}{{with index $.RefFilter (printf "%s.%s" $tpName $fn)}} data-ref-filter="{{.}}"{{end}}{{end}}{{if and (.InlineCreateEnabled true) (refWriteAllowed $.RefWriteAccess .RefEntity)}} data-ref-allow-create="1"{{end}}{{if $tpReadOnly}} disabled{{end}}>
               <option value="">{{t $.Lang "— выбрать —"}}</option>
               {{range index $tpRef $fn}}
               <option value="{{index . "id"}}" {{if eq (str (index . "id")) (refID (index $row $fn))}}selected{{end}}>{{index . "_label"}}</option>

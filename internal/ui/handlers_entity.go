@@ -383,7 +383,7 @@ func (s *Server) form(w http.ResponseWriter, r *http.Request) {
 		folderOpts = s.loadFolderOptions(r.Context(), entity, values["parent_id"])
 	}
 	refOptions, _ := s.loadInitialRefOptions(r.Context(), entity, values)
-	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows)
+	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows, values)
 	s.renderEntityForm(w, r, "object", map[string]any{
 		"Entity":        entity,
 		"IsNew":         true,
@@ -567,6 +567,13 @@ func fieldKeyForForm(entity *metadata.Entity, lowerKey string) string {
 	return lowerKey
 }
 
+// dateInputLayout — значение поля <input type="datetime-local"> вместе с
+// секундами (поле рисуется со step="1"). Без секунд форма держала дату с
+// точностью до минуты: «Записать» молча отрезал секунды от даты документа,
+// переставляя документы внутри минуты (МоментВремени, ФИФО, остатки на момент),
+// а сверка формы с базой считала только что открытую форму изменённой.
+const dateInputLayout = "2006-01-02T15:04:05"
+
 // formatFieldValueForInput приводит значение к браузерному представлению с
 // учётом типа метаданных. SQLite возвращает bool как int64 и date как string,
 // поэтому fmt.Sprint без типа превращал true в "1" и ломал datetime-local.
@@ -588,7 +595,7 @@ func formatUntypedValueForInput(v any) string {
 		return ""
 	}
 	if t, ok := v.(time.Time); ok {
-		return t.In(time.Local).Format("2006-01-02T15:04")
+		return t.In(time.Local).Format(dateInputLayout)
 	}
 	if ref, ok := v.(interface{ GetRefUUID() string }); ok {
 		if s := ref.GetRefUUID(); s != "" {
@@ -603,7 +610,7 @@ func formatDateValueForInput(v any) string {
 		return ""
 	}
 	if t, ok := v.(time.Time); ok {
-		return t.In(time.Local).Format("2006-01-02T15:04")
+		return t.In(time.Local).Format(dateInputLayout)
 	}
 	raw, ok := v.(string)
 	if !ok || strings.TrimSpace(raw) == "" {
@@ -618,12 +625,12 @@ func formatDateValueForInput(v any) string {
 		"2006-01-02T15:04", "2006-01-02",
 	} {
 		if parsed, err := time.Parse(layout, raw); err == nil {
-			return parsed.In(time.Local).Format("2006-01-02T15:04")
+			return parsed.In(time.Local).Format(dateInputLayout)
 		}
 	}
 	if len(raw) >= 10 {
 		if parsed, err := time.ParseInLocation("2006-01-02", raw[:10], time.Local); err == nil {
-			return parsed.Format("2006-01-02T15:04")
+			return parsed.Format(dateInputLayout)
 		}
 	}
 	return raw
@@ -785,7 +792,7 @@ func (s *Server) renderObjectFormError(w http.ResponseWriter, r *http.Request, e
 	}
 	tablePartRows := serializeTablePartRowsForEntity(tpRows, entity, managedForm)
 	refOptions, _ := s.loadInitialRefOptions(r.Context(), entity, values)
-	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows)
+	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows, values)
 	lang := s.resolveLang(r)
 	data := map[string]any{
 		"Entity":        entity,
@@ -941,7 +948,7 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		values := formValues(r, entity)
 		tablePartRows := serializeTablePartRowsForEntity(tpRows, entity, pickManagedForm(entity, "object"))
 		refOptions, _ := s.loadInitialRefOptions(r.Context(), entity, values)
-		tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows)
+		tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows, values)
 		langErr := s.resolveLang(r)
 		var fOpts []map[string]any
 		if entity.Hierarchical {
@@ -1065,10 +1072,16 @@ func (s *Server) refOptionsJSON(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = n
 	}
+	// Отбор подбора подчинённого справочника: «реквизит → значение» приезжает
+	// параметром flt от клиента (см. data-ref-filter в разметке). У подчинённого
+	// справочника без владельца выдача ПУСТА — и это ответ, а не ошибка: сначала
+	// контрагент, потом договор. Связи параметров выбора (план 170) едут своим
+	// контрактом choice и в flt не попадают.
+	base, fltOK := refOptionsFilters(ent, r.URL.Query().Get("flt"), storage.ListParams{})
 	items := make([]map[string]any, 0)
 	total := 0
-	if choice == nil || !choice.Empty {
-		extra := storage.ListParams{}
+	if fltOK && (choice == nil || !choice.Empty) {
+		extra := base
 		if choice != nil {
 			extra.ChoicePredicates = choice.Predicates
 		}
@@ -1096,8 +1109,10 @@ func (s *Server) refOptionsJSON(w http.ResponseWriter, r *http.Request) {
 	response["preview"] = previewField
 	if choice != nil && choice.Selected != nil {
 		allowed := false
-		if !choice.Empty {
-			allowed, err = s.choiceSelectedAllowed(r.Context(), ent, *choice.Selected, choice.Predicates)
+		if !choice.Empty && fltOK {
+			check := base
+			check.ChoicePredicates = choice.Predicates
+			allowed, err = s.choiceSelectedAllowedWithParams(r.Context(), ent, *choice.Selected, check)
 			if err != nil {
 				s.serverError(w, r, err)
 				return
@@ -1388,7 +1403,7 @@ func (s *Server) formEdit(w http.ResponseWriter, r *http.Request) {
 		}
 		if f.Type == metadata.FieldTypeDate {
 			if t, ok := v.(time.Time); ok {
-				vals[f.Name] = t.In(time.Local).Format("2006-01-02T15:04")
+				vals[f.Name] = t.In(time.Local).Format(dateInputLayout)
 				continue
 			}
 			// SQLite returns dates as strings — parse and reformat for <input type="datetime-local">
@@ -1403,7 +1418,7 @@ func (s *Server) formEdit(w http.ResponseWriter, r *http.Request) {
 					"2006-01-02T15:04", "2006-01-02",
 				} {
 					if t, err2 := time.Parse(layout, s2); err2 == nil {
-						vals[f.Name] = t.In(time.Local).Format("2006-01-02T15:04")
+						vals[f.Name] = t.In(time.Local).Format(dateInputLayout)
 						parsed = true
 						break
 					}
@@ -1411,7 +1426,7 @@ func (s *Server) formEdit(w http.ResponseWriter, r *http.Request) {
 				// Last resort: extract just the date prefix
 				if !parsed && len(s2) >= 10 {
 					if t, err2 := time.ParseInLocation("2006-01-02", s2[:10], time.Local); err2 == nil {
-						vals[f.Name] = t.Format("2006-01-02T15:04")
+						vals[f.Name] = t.Format(dateInputLayout)
 					}
 				}
 				continue
@@ -1478,7 +1493,7 @@ func (s *Server) formEdit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	refOptions, _ := s.loadInitialRefOptions(r.Context(), entity, vals)
-	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tpRows)
+	tpRefOpts, _ := s.loadInitialTPRefOptions(r.Context(), entity, tpRows, vals)
 
 	editUser := auth.UserFromContext(r.Context())
 	editIsAdmin := editUser == nil || editUser.IsAdmin
@@ -1648,7 +1663,7 @@ func (s *Server) submitEdit(w http.ResponseWriter, r *http.Request) {
 		values := formValues(r, entity)
 		tablePartRows := serializeTablePartRowsForEntity(tpRows, entity, pickManagedForm(entity, "object"))
 		refOptions, _ := s.loadInitialRefOptions(r.Context(), entity, values)
-		tpRefOpts2, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows)
+		tpRefOpts2, _ := s.loadInitialTPRefOptions(r.Context(), entity, tablePartRows, values)
 		values["_version"] = r.FormValue("_version")
 		langSubmit := s.resolveLang(r)
 		var fOpts []map[string]any
