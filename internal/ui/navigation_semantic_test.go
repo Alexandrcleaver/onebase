@@ -202,9 +202,10 @@ func TestSemanticNavigation_GlobalNilEmptyAndScoped(t *testing.T) {
 	for _, mode := range []string{"nil", "empty", "scoped"} {
 		s := semanticSchoolServer(t, "School")
 		home := &metadata.HomePage{Menu: &metadata.Menu{Sections: []metadata.MenuSection{{ID: "home-school", Title: "School", Items: []metadata.MenuItem{{ID: "home-classes", Target: "catalog:Classes"}}}}}}
-		if mode == "empty" {
+		switch mode {
+		case "empty":
 			home.Nav = &metadata.SubsystemContents{}
-		} else if mode == "scoped" {
+		case "scoped":
 			home.Nav = &metadata.SubsystemContents{Catalogs: []string{"Classes"}, Pages: []string{"TeacherPage"}}
 		}
 		s.reg.LoadHomePage(home)

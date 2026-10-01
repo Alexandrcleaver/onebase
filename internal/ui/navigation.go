@@ -4,9 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
-	"net/url"
 	"sort"
-	"strings"
 
 	"github.com/ivantit66/onebase/internal/auth"
 	"github.com/ivantit66/onebase/internal/metadata"
@@ -68,12 +66,6 @@ func (s *Server) buildNav(r *http.Request, sub string) []navGroup {
 
 func (s *Server) buildNavForSubsystem(r *http.Request, sub *metadata.Subsystem, name string) []navGroup {
 	return s.buildNavigation(r, sub.Menu, &sub.Contents, false, name)
-}
-
-// Retain the scoped legacy entry point without making empty contents global.
-func (s *Server) buildNavFromContents(r *http.Request, contents *metadata.SubsystemContents, q string) []navGroup {
-	values, _ := url.ParseQuery(strings.TrimPrefix(q, "?"))
-	return s.buildNavigation(r, nil, contents, false, values.Get("subsystem"))
 }
 
 func (s *Server) buildFlatNav(r *http.Request) []navGroup {
