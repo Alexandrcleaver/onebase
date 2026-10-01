@@ -244,9 +244,11 @@ func CheckFormChoiceFilter(proj *project.Project) []Issue {
 							add("%s: eq_or_empty требует ссылочный field и from", where)
 							continue
 						}
-						source, sourceOK := formChoiceRefSource(owner, form, cond.From, entities)
-						if !sourceOK || source == nil {
-							add("%s: from %q не является явной ссылкой Объект.* или Форма.*", where, cond.From)
+						// Источник — тот же общий разбор, что у eq: прямая ссылка
+						// формы или один переход по ссылке (план 183, срез B1).
+						source, problem := formChoiceSourceEntity(owner, form, cond.From, entities)
+						if problem != "" {
+							add("%s: %s", where, problem)
 							continue
 						}
 						if targetField.RefEntity == "" || !strings.EqualFold(targetField.RefEntity, source.Name) {
