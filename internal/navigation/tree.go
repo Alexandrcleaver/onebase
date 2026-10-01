@@ -31,6 +31,9 @@ type Object struct {
 // Global flat navigation also marks external reports/processors.
 func (o Object) Label(lang string, translate func(string) string, flat bool) string {
 	label := DisplayTitle(o.Title, o.Titles, lang)
+	if o.Target.Kind == "system" {
+		label = translate(label)
+	}
 	suffix := ""
 	switch {
 	case o.Target.View == "movements":
@@ -251,7 +254,7 @@ func cloneSections(input []Section) []Section {
 
 // DisplayTitle uses metadata's exact-language/title fallback policy.
 func DisplayTitle(title string, titles map[string]string, lang string) string {
-	if v := titles[lang]; strings.TrimSpace(v) != "" {
+	if v := titles[lang]; lang != "" && v != "" {
 		return v
 	}
 	return title

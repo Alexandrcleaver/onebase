@@ -15,30 +15,30 @@ func navigationObjects(p *project.Project) []navigation.Object {
 		objects = append(objects, navigation.Object{Target: navigation.Target{Kind: kind, Name: name}, Title: title, Titles: titles})
 	}
 	for _, e := range p.Entities {
-		add(string(e.Kind), e.Name, e.DisplayName("ru"), e.Titles)
+		add(string(e.Kind), e.Name, e.DisplayName(""), e.Titles)
 	}
 	for _, r := range p.Registers {
 		for _, view := range []string{"movements", "balances"} {
-			objects = append(objects, navigation.Object{Target: navigation.Target{Kind: "register", Name: r.Name, View: view}, Title: r.DisplayName("ru"), Titles: r.Titles})
+			objects = append(objects, navigation.Object{Target: navigation.Target{Kind: "register", Name: r.Name, View: view}, Title: r.DisplayName(""), Titles: r.Titles})
 		}
 	}
 	for _, r := range p.InfoRegisters {
-		add("inforeg", r.Name, r.DisplayName("ru"), r.Titles)
+		add("inforeg", r.Name, r.DisplayName(""), r.Titles)
 		objects[len(objects)-1].Periodic = r.Periodic
 	}
 	for _, r := range p.Reports {
-		add("report", r.Name, r.DisplayName("ru"), r.Titles)
+		add("report", r.Name, r.DisplayName(""), r.Titles)
 		objects[len(objects)-1].External = r.External
 	}
 	for _, r := range p.Processors {
-		add("processor", r.Name, r.DisplayName("ru"), r.Titles)
+		add("processor", r.Name, r.DisplayName(""), r.Titles)
 		objects[len(objects)-1].External, objects[len(objects)-1].Trusted = r.External, r.Trusted
 	}
 	for _, r := range p.Journals {
-		add("journal", r.Name, r.DisplayName("ru"), r.Titles)
+		add("journal", r.Name, r.DisplayName(""), r.Titles)
 	}
 	for _, r := range p.Pages {
-		add("page", r.Name, r.DisplayName("ru"), r.Titles)
+		add("page", r.Name, r.DisplayName(""), r.Titles)
 	}
 	if len(p.Constants) > 0 {
 		add("system", "constants", "Константы", map[string]string{"en": "Constants"})
@@ -55,7 +55,11 @@ func checkNavigation(p *project.Project, warnings bool) []Issue {
 		if menu == nil {
 			return
 		}
-		_, diagnostics := navigation.Normalize(name, menu, navigation.NewScope(objects, contents, global))
+		context := "global"
+		if !global {
+			context = "subsystem:" + name
+		}
+		_, diagnostics := navigation.Normalize(context, menu, navigation.NewScope(objects, contents, global))
 		for _, d := range diagnostics {
 			if d.Warning == warnings {
 				issues = append(issues, Issue{File: file, Object: name, Kind: "Навигация", Code: d.Code, Message: d.Node + ": " + d.Message,

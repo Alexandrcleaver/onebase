@@ -70,7 +70,7 @@ func (t Target) URL(context string) string {
 	if t.View == "balances" {
 		path += "/balances"
 	}
-	if context != "" && context != "global" {
+	if context != "" {
 		path += "?" + url.Values{"subsystem": {context}}.Encode()
 	}
 	return path
