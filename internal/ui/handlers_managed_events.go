@@ -1229,6 +1229,9 @@ func (s *Server) handleManagedFormEventMode(w http.ResponseWriter, r *http.Reque
 	choiceFn := newChoiceListBuiltin(&choiceItems)
 	vars["ДобавитьЗначениеСписка"] = choiceFn
 	vars["AddChoiceItem"] = choiceFn
+	if closeInv != nil {
+		disableDialogBuiltinsForClose(vars)
+	}
 
 	condRuntime := newFormConditionalRuntime(form)
 	for k, v := range condRuntime.builtins() {
@@ -1399,6 +1402,9 @@ func (s *Server) handleManagedFormEventMode(w http.ResponseWriter, r *http.Reque
 	dirty := transientManagedStateDirty(obj, fieldsBefore, tpBefore)
 	if existingRecord || thisObj.saved || (closeInv != nil && closeInv.saved) {
 		dirty = s.managedCloseStateDirty(liveCtx, entity, form, obj, fieldsBefore, tpBefore)
+	}
+	if formOpenEvent(elementName, eventName) && !thisObj.saved {
+		dirty = false
 	}
 	eventDirty := boolPtr(dirty)
 	if runErr != nil {
@@ -1719,6 +1725,17 @@ func snapshotValueCI(snapshot map[string]string, name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// formOpenEvent — событие открытия формы (ПриОткрытии уровня формы). Всё, что
+// его обработчик заполняет — умолчания нового документа, дата и склад рабочего
+// места, — исходное состояние формы, а не правка пользователя: как в 1С, где
+// программное изменение данных формы модифицированность не ставит. Иначе форма
+// открывалась со звёздочкой в заголовке и спрашивала о сохранении при уходе,
+// хотя пользователь ничего не трогал. Запись объекта самим обработчиком
+// (Объект.Записать()) по-прежнему сверяется с базой.
+func formOpenEvent(elementName, eventName string) bool {
+	return elementName == "" && strings.EqualFold(eventName, string(metadata.FormEventOnOpen))
 }
 
 // transientManagedStateDirty is used by processor forms, which have no
@@ -2546,6 +2563,9 @@ func (s *Server) handleProcessorFormEventMode(w http.ResponseWriter, r *http.Req
 		choiceFn := newChoiceListBuiltin(&choiceItems)
 		vars["ДобавитьЗначениеСписка"] = choiceFn
 		vars["AddChoiceItem"] = choiceFn
+		if closeInv != nil {
+			disableDialogBuiltinsForClose(vars)
+		}
 
 		condRuntime := newFormConditionalRuntime(form)
 		for k, v := range condRuntime.builtins() {
@@ -2604,7 +2624,7 @@ func (s *Server) handleProcessorFormEventMode(w http.ResponseWriter, r *http.Req
 				q := question
 				resp.Question = &q
 			}
-			resp.Dirty = boolPtr(transientManagedStateDirty(obj, fieldsBefore, tablesBefore))
+			resp.Dirty = boolPtr(!formOpenEvent(elementName, eventName) && transientManagedStateDirty(obj, fieldsBefore, tablesBefore))
 			compactFormCloseDelta(&resp, closeInv)
 			respondJSON(enc, resp)
 			return
@@ -2617,7 +2637,7 @@ func (s *Server) handleProcessorFormEventMode(w http.ResponseWriter, r *http.Req
 			resp.Question = &q
 		}
 		resp.ChoiceList = choiceItems
-		resp.Dirty = boolPtr(transientManagedStateDirty(obj, fieldsBefore, tablesBefore))
+		resp.Dirty = boolPtr(!formOpenEvent(elementName, eventName) && transientManagedStateDirty(obj, fieldsBefore, tablesBefore))
 		compactFormCloseDelta(&resp, closeInv)
 		respondJSON(enc, resp)
 		return

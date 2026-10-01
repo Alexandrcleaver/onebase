@@ -599,7 +599,7 @@ elements:
 	form := url.Values{
 		"op":            {"setChoiceFilter"},
 		"node":          {"elements.0"},
-		"choice_filter": {`[{"field":"Направление","op":"in_hierarchy","from":"Объект.Направление"},{"field":"is_folder","op":"eq","value":false}]`},
+		"choice_filter": {`[{"field":"Направление","op":"in_hierarchy","from":"Объект.Направление"},{"field":"is_folder","op":"eq","value":false},{"field":"Филиал","op":"eq_or_empty","from":"Объект.Филиал"}]`},
 		"yaml":          {src},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/bases/"+b.ID+"/configurator/forms/edit-op", strings.NewReader(form.Encode()))
@@ -621,11 +621,14 @@ elements:
 		t.Fatalf("ok=false: %v", response.Errors)
 	}
 	conditions := response.Model["elements.0"].ChoiceFilter
-	if len(conditions) != 2 || conditions[0].Field != "Направление" || conditions[0].From != "Объект.Направление" {
+	if len(conditions) != 3 || conditions[0].Field != "Направление" || conditions[0].From != "Объект.Направление" {
 		t.Fatalf("ordered choice_filter was lost in model: %+v", conditions)
 	}
 	if conditions[1].Field != "is_folder" || conditions[1].Value == nil || *conditions[1].Value {
 		t.Fatalf("typed value:false was lost in model: %+v", conditions[1])
+	}
+	if conditions[2].Op != "eq_or_empty" || conditions[2].From != "Объект.Филиал" {
+		t.Fatalf("eq_or_empty was lost in model: %+v", conditions[2])
 	}
 	first := strings.Index(response.YAML, "field: Направление")
 	second := strings.Index(response.YAML, "field: is_folder")
@@ -647,11 +650,11 @@ elements:
 	if err != nil {
 		t.Fatalf("reload edited form: %v", err)
 	}
-	if len(loaded.Elements) != 1 || len(loaded.Elements[0].ChoiceFilter) != 2 {
+	if len(loaded.Elements) != 1 || len(loaded.Elements[0].ChoiceFilter) != 3 {
 		t.Fatalf("choice_filter was lost after save/load: %+v", loaded.Elements)
 	}
 	reloaded := loaded.Elements[0].ChoiceFilter
-	if reloaded[0].Field != "Направление" || reloaded[1].Value == nil || *reloaded[1].Value {
+	if reloaded[0].Field != "Направление" || reloaded[1].Value == nil || *reloaded[1].Value || reloaded[2].Op != "eq_or_empty" || reloaded[2].From != "Объект.Филиал" {
 		t.Fatalf("choice_filter semantics changed after save/load: %+v", reloaded)
 	}
 }

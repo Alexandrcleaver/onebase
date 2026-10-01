@@ -68,6 +68,7 @@ func CheckLintProject(dir string, proj *project.Project, roles []*auth.Role) []I
 	issues = append(issues, CheckLintIndexes(proj)...)
 	issues = append(issues, CheckLintReports(proj)...)
 	issues = append(issues, CheckLintFormAttrTypes(proj)...)
+	issues = append(issues, checkNavigation(proj, true)...)
 	return issues
 }
 
@@ -575,6 +576,7 @@ func subsystemYAMLSchema() *yamlLintSchema {
 		"titles":    freeMap(),
 		"contents":  contents,
 		"home_page": homePageYAMLSchema(),
+		"menu":      menuYAMLSchema(),
 	})
 }
 
@@ -608,6 +610,7 @@ func homePageYAMLSchema() *yamlLintSchema {
 		"rows":    seq(obj("widgets")),
 		"widgets": seq(obj("name", "span")),
 		"nav":     nav,
+		"menu":    menuYAMLSchema(),
 	})
 }
 
@@ -2229,4 +2232,11 @@ func sourceLabelForToken(fallback string, tok token.Token) string {
 
 func tokenKey(tok token.Token) string {
 	return fmt.Sprintf("%s:%d:%d:%s", tok.File, tok.Line, tok.Col, strings.ToLower(tok.Literal))
+}
+
+func menuYAMLSchema() *yamlLintSchema {
+	item := with(obj("id", "target", "title", "icon"), map[string]*yamlLintSchema{"titles": freeMap()})
+	group := with(obj("id", "title", "icon"), map[string]*yamlLintSchema{"titles": freeMap(), "items": seq(item)})
+	section := with(obj("id", "title", "icon"), map[string]*yamlLintSchema{"titles": freeMap(), "items": seq(item), "groups": seq(group)})
+	return with(obj(), map[string]*yamlLintSchema{"sections": seq(section)})
 }

@@ -447,14 +447,14 @@ func allSchemas() map[string]map[string]any {
 		"role":      looseNamedSchema("OneBase RBAC role"),
 		"page":      looseNamedSchema("OneBase page"),
 		"service":   looseNamedSchema("OneBase HTTP service"),
-		"subsystem": looseNamedSchema("OneBase subsystem"),
+		"subsystem": navigationContainerSchema(false),
 		"journal":   looseNamedSchema("OneBase document journal"),
 		"scheduled": looseNamedSchema("OneBase scheduled job"),
 		"accounts":  looseNamedSchema("OneBase chart of accounts"),
 		"accountreg": fieldGroupSchema("OneBase accounting register", accountRegField, []string{"resources", "subconto"}, map[string]any{
 			"accounts": stringSchema("Имя плана счетов"),
 		}),
-		"home-page": looseNamedSchema("OneBase home page"),
+		"home-page": navigationContainerSchema(true),
 	}
 }
 
@@ -523,7 +523,7 @@ func managedFormSchema() map[string]any {
 		"required":             []string{"field", "op"},
 		"properties": map[string]any{
 			"field": stringSchema("Реквизит выбираемого справочника или служебное поле is_folder"),
-			"op":    enumSchema("eq", "in_hierarchy"),
+			"op":    enumSchema("eq", "eq_or_empty", "in_hierarchy"),
 			"from":  stringSchema("Источник Объект.<Поле>, Форма.<Поле> или Объект.<Поле>.<Реквизит> — один переход по ссылке"),
 			"value": boolSchema("Булев литерал: is_folder или булев реквизит справочника"),
 		},
