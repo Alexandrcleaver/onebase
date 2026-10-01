@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ivantit66/onebase/internal/access"
 	"github.com/ivantit66/onebase/internal/metadata"
+	processorpkg "github.com/ivantit66/onebase/internal/processor"
 	"github.com/ivantit66/onebase/internal/storage"
 )
 
@@ -20,11 +21,18 @@ const maxChoiceSourcesJSON = 16 << 10
 // controls at request time, while the server restores Field/Op from the form in
 // the registry and never trusts them from the browser.
 type managedChoiceContext struct {
-	FormEntity string            `json:"form_entity"`
-	Form       string            `json:"form"`
-	Element    string            `json:"element"`
-	Sources    map[string]string `json:"sources,omitempty"` // full metadata path -> browser control name
+	FormEntity string `json:"form_entity"`
+	// FormKind различает владельца формы: пусто — документ или справочник,
+	// "processor" — обработка (#1840). Имена обработок и сущностей живут в
+	// разных пространствах, поэтому вид едет явно, а не угадывается по имени.
+	FormKind string            `json:"form_kind,omitempty"`
+	Form     string            `json:"form"`
+	Element  string            `json:"element"`
+	Sources  map[string]string `json:"sources,omitempty"` // full metadata path -> browser control name
 }
+
+// choiceFormKindProcessor — значение form_kind для формы обработки.
+const choiceFormKindProcessor = "processor"
 
 type resolvedChoiceRequest struct {
 	Predicates []storage.ChoicePredicate
@@ -297,7 +305,7 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 	// ignored unknown query parameters, so adding it must not turn an otherwise
 	// context-free request into a 400. Identity/source parameters do opt in and
 	// therefore require the complete trusted metadata context below.
-	contextKeys := []string{"form_entity", "form", "element", "sources"}
+	contextKeys := []string{"form_entity", "form_kind", "form", "element", "sources"}
 	contextPresent := false
 	for _, key := range contextKeys {
 		if _, ok := query[key]; ok {
@@ -329,14 +337,14 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 	if err != nil {
 		return nil, err
 	}
-
-	owner := s.reg.GetEntity(ownerName)
-	if owner == nil {
-		return nil, fmt.Errorf("unknown form entity")
+	formKind, err := oneQueryValue(query, "form_kind", false)
+	if err != nil {
+		return nil, err
 	}
-	form := findManagedFormByName(owner, formName)
-	if form == nil {
-		return nil, fmt.Errorf("unknown managed form")
+
+	owner, form, err := s.choiceFormOwner(r, formKind, ownerName, formName)
+	if err != nil {
+		return nil, err
 	}
 	element := findChoiceElementByID(form, elementID)
 	if element == nil || len(element.ChoiceFilter) == 0 {
@@ -364,6 +372,41 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 		resolved.Selected = &id
 	}
 	return resolved, nil
+}
+
+// choiceFormOwner восстанавливает владельца формы и саму форму из реестра.
+// У обработки владелец — её виртуальная сущность (поля — параметры), форма —
+// управляемая форма обработки; контекст принимается только от того, кто
+// вправе открыть эту форму (processor/<имя>/run, для внешней — допуск
+// администратора), иначе подбор формы обработки стал бы обходным каналом.
+func (s *Server) choiceFormOwner(r *http.Request, formKind, ownerName, formName string) (*metadata.Entity, *metadata.FormModule, error) {
+	switch formKind {
+	case "":
+		owner := s.reg.GetEntity(ownerName)
+		if owner == nil {
+			return nil, nil, fmt.Errorf("unknown form entity")
+		}
+		form := findManagedFormByName(owner, formName)
+		if form == nil {
+			return nil, nil, fmt.Errorf("unknown managed form")
+		}
+		return owner, form, nil
+	case choiceFormKindProcessor:
+		proc := s.reg.GetProcessor(ownerName)
+		if proc == nil {
+			return nil, nil, fmt.Errorf("unknown form processor")
+		}
+		if !s.can(r, "processor", proc.Name, "run") || !s.canRunExternalProc(r, proc) {
+			return nil, nil, fmt.Errorf("form processor is not available")
+		}
+		form := proc.ManagedForm()
+		if form == nil || !strings.EqualFold(form.Name, formName) {
+			return nil, nil, fmt.Errorf("unknown managed form")
+		}
+		return processorVirtualEntity(proc), form, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown form kind")
+	}
 }
 
 func (s *Server) choiceSelectedAllowed(ctx context.Context, target *metadata.Entity, id uuid.UUID, predicates []storage.ChoicePredicate) (bool, error) {
@@ -457,6 +500,19 @@ func (s *Server) initialChoiceOptions(ctx context.Context, owner *metadata.Entit
 // into choice_filter and publishes opaque picker context for ui.js. Other
 // managed and all autogen reference fields keep the legacy path unchanged.
 func (s *Server) applyManagedChoiceFilters(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, data map[string]any) {
+	s.applyChoiceFilters(ctx, owner, form, "", data)
+}
+
+// applyProcessorChoiceFilters — то же для управляемой формы обработки:
+// владелец — виртуальная сущность обработки, контекст помечен form_kind (#1840).
+func (s *Server) applyProcessorChoiceFilters(ctx context.Context, proc *processorpkg.Processor, data map[string]any) {
+	if proc == nil {
+		return
+	}
+	s.applyChoiceFilters(ctx, processorVirtualEntity(proc), proc.ManagedForm(), choiceFormKindProcessor, data)
+}
+
+func (s *Server) applyChoiceFilters(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, formKind string, data map[string]any) {
 	if owner == nil || form == nil || data == nil {
 		return
 	}
@@ -495,6 +551,7 @@ func (s *Server) applyManagedChoiceFilters(ctx context.Context, owner *metadata.
 		}
 		encoded, err := json.Marshal(managedChoiceContext{
 			FormEntity: owner.Name,
+			FormKind:   formKind,
 			Form:       form.Name,
 			Element:    element.ID,
 			Sources:    controls,

@@ -228,3 +228,22 @@ test('network failure is visible and preserves the previously filtered options a
   assert.equal(env.attrs['data-ob-choice-error'], '1');
   assert.equal(env.attrs['data-ob-choice-loading'], undefined);
 });
+
+test('processor form context forwards form_kind; entity context does not add it (#1840)', async () => {
+  const calls = [];
+  const env = runtime(async (url) => { calls.push(url); return response({items: [], total: 0}); });
+  await env.api.obRefreshChoiceSelect(env.select, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].includes('form_kind='), false);
+
+  env.attrs['data-ref-choice-context'] = JSON.stringify({
+    form_entity: 'ПоискЗаявок',
+    form_kind: 'processor',
+    form: 'ФормаОбъекта',
+    element: 'inventory-storage-choice',
+    sources: {'Объект.Склад': 'Склад'},
+  });
+  await env.api.obRefreshChoiceSelect(env.select, true);
+  assert.equal(calls.length, 2);
+  assert.match(calls[1], /&form_entity=%D0%9F[^&]*&form_kind=processor&form=/);
+});
