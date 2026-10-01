@@ -2470,6 +2470,55 @@ filters:
 
 Файл: `subsystems/<имя>.yaml`
 
+Порядок внутри каждой категории меню «Предприятия» соответствует массиву
+`contents` и не зависит от языка подписей. `tree_order.yaml` задаёт только
+порядок дерева конфигуратора. Непустой `config/home_page.yaml → nav` также
+сохраняет порядок массивов; отсутствующий или пустой `nav` сохраняет глобальное
+алфавитное меню.
+
+**Контракт смыслового меню (план 169, срез A).** Необязательный `menu` допустим
+в YAML подсистемы и глобальной `config/home_page.yaml`. Команда `onebase check`
+проверяет его; отображение section/group в runtime поставляется срезом B.
+В этом срезе `menu` не меняет показ интерфейса.
+
+```yaml
+menu:
+  sections:
+    - id: academic-years
+      title: Учебные годы
+      titles:
+        en: Academic years
+      icon: calendar-days
+      items:
+        - id: years
+          target: catalog:УчебныеГоды
+      groups:
+        - id: orders
+          title: Приказы
+          items:
+            - id: opening-order
+              target: document:ПриказОНачалеУчебногоГода
+```
+
+Три уровня: section → необязательная group → item. Обязательны уникальные во
+всём контексте `id` (`[a-z][a-z0-9-]{0,62}`), заголовки section/group и `target`
+у item. `other` зарезервирован. У item можно переопределить `title`, `titles`
+и `icon`; без переопределения используется представление объекта. Массивы
+определяют порядок. Пределы: 100 sections, 500 groups и 5000 item occurrences,
+включая автоматически добавляемые неразмещённые объекты.
+
+Типизированные цели: `catalog:<name>`, `document:<name>`, `inforeg:<name>`,
+`report:<name>`, `processor:<name>`, `journal:<name>`, `page:<name>` и
+`register:<name>:movements|balances`. URL и произвольная вложенность запрещены.
+Цель должна существовать и входить в `contents`/непустой глобальный `nav`.
+При nil/пустом глобальном `nav` допустимы объекты плоского меню: pages туда
+не входят, а `system:constants` доступен только при наличии констант.
+`system:constants` запрещён в подсистеме и в непустом глобальном `nav`.
+Остальные допустимые цели нормализуются в секцию «Другое»; повтор одной цели
+в разных местах разрешён с разными ID, повтор внутри родителя даёт lint warning.
+Метаданные меню определяют раскладку; права доступа остаются отдельной проверкой.
+JSON Schema: `onebase schema subsystem` и `onebase schema home-page`.
+
 ```yaml
 name: Продажи
 title: Продажи
