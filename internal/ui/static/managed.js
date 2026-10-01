@@ -2448,7 +2448,23 @@ obManagedReady(obManagedInitDelegates);
     var wrapper, input, dropBtn, list;
     var isOpen = false, selectedId = '', defaultValue = '';
     var refEntity = (args.column && args.column.refEntity) || '';
+    var refFilter = (args.column && args.column.refFilter) || '';
+    var initialFilter = '';
+    try {
+      if (refFilter) {
+        var spec = JSON.parse(refFilter), initial = {};
+        Object.keys(spec).forEach(function(key) { initial[key] = (spec[key] && spec[key].value) || ''; });
+        initialFilter = '&flt=' + encodeURIComponent(JSON.stringify(initial));
+      }
+    } catch (e) {}
+    function filterParam() {
+      if (!refFilter || typeof window.obRefFilterParam !== 'function') return '';
+      var carrier = document.createElement('select');
+      carrier.setAttribute('data-ref-filter', refFilter);
+      return window.obRefFilterParam(carrier);
+    }
     var serverRows = [];   // последний ответ серверного поиска
+    var serverFilter = '';
     var shown = [];        // что сейчас отрисовано в списке (для ↑/↓ и Enter)
     var activeIdx = -1;    // подсвеченный пункт списка, -1 — нет подсветки
     var searchTimer = null, searchSeq = 0;
@@ -2468,7 +2484,7 @@ obManagedReady(obManagedInitDelegates);
       for (var k = 0; k < refOptsList.length; k++) {
         if (String(refOptsList[k].id) === String(opt.id)) return;
       }
-      refOptsList.push({id: opt.id, _label: opt._label});
+      refOptsList.push({id: opt.id, _label: opt._label, _ownerFilter: filterParam()});
     }
 
     // candidates — предзагруженные опции + серверные результаты, отфильтрованные
@@ -2485,8 +2501,13 @@ obManagedReady(obManagedInitDelegates);
         seen[key] = true;
         out.push({id: o.id, _label: lbl});
       }
-      for (var i = 0; i < refOptsList.length; i++) push(refOptsList[i]);
-      for (var j = 0; j < serverRows.length; j++) push(serverRows[j]);
+      var currentFilter = filterParam();
+      for (var i = 0; i < refOptsList.length; i++) {
+        if ((refOptsList[i]._ownerFilter || initialFilter) === currentFilter) push(refOptsList[i]);
+      }
+      if (currentFilter === serverFilter) {
+        for (var j = 0; j < serverRows.length; j++) push(serverRows[j]);
+      }
       return out;
     }
 
@@ -2581,16 +2602,18 @@ obManagedReady(obManagedInitDelegates);
     function searchServer(q) {
       if (!refEntity || !window.fetch) return;
       var seq = ++searchSeq;
+      var requestFilter = filterParam();
       var url = '/ui/_ref-options/' + encodeURIComponent(refEntity) +
-                '?limit=50&q=' + encodeURIComponent(q || '');
+                '?limit=50&q=' + encodeURIComponent(q || '') + requestFilter;
       fetch(url, {credentials: 'same-origin', headers: {'Accept': 'application/json'}})
         .then(function(resp) { if (!resp.ok) throw new Error('HTTP ' + resp.status); return resp.json(); })
         .then(function(data) {
-          if (seq !== searchSeq) return; // ответ устарел (или редактор уже закрыт)
+          if (seq !== searchSeq || requestFilter !== filterParam()) return; // ответ устарел
           var keep = (activeIdx >= 0 && shown[activeIdx]) ? shown[activeIdx].id : '';
           serverRows = ((data && data.items) || []).map(function(row) {
             return {id: row && row.id != null ? String(row.id) : '', _label: String((row && row._label) || '')};
           }).filter(function(o) { return o.id !== ''; });
+          serverFilter = requestFilter;
           if (isOpen) buildList(input.value, keep);
         })
         .catch(function() { /* сеть/ошибка — остаются предзагруженные опции */ });
@@ -2630,6 +2653,7 @@ obManagedReady(obManagedInitDelegates);
       if (typeof window.openRefPicker !== 'function') return;
       var selEl = document.createElement('select');
       selEl.setAttribute('data-ref-entity', refEntity);
+      if (refFilter) selEl.setAttribute('data-ref-filter', refFilter);
       // «+ Создать» в форме подбора включается тем же признаком колонки, что и
       // в автоформе (allow_inline_create у поля ТЧ). Без переноса на временный
       // select подбор из ячейки не давал создать элемент НИКОГДА, даже когда
@@ -3020,6 +3044,7 @@ obManagedReady(obManagedInitDelegates);
         // него в ячейке были видны только предзагруженные опции, а модалка
         // подбора уходила в локальный фильтр вместо /ui/_ref-options.
         col.refEntity = c.ref;
+        col.refFilter = c.refFilter || '';
         // allowCreate приходит из allow_inline_create поля ТЧ (сервер кладёт
         // его в data-sg-cols только когда создание разрешено).
         col.allowCreate = !!c.allowCreate;
