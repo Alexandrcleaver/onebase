@@ -1042,7 +1042,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
           if (data.error) flash(data.error, 'err');
         }
         setManagedFormDirty(true);
-        flash('Форма изменилась во время выполнения команды — переход не выполнен', 'err');
+        flash(closeMessage('navigationFormChanged', 'Форма изменилась во время выполнения команды — переход не выполнен'), 'err');
         return;
       }
       // Навигация (#1557): переход только у инициатора, адрес построен
@@ -1095,7 +1095,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
 	  if (data.dirty === false && (data.savedId || data.version)) setManagedFormDirty(false);
       (data.messages || []).forEach(m => flash(m, 'ok'));
       if (data.error) flash(data.error, 'err');
-      if (navigationBlocked) flash('Форма содержит несохранённые изменения — переход не выполнен', 'err');
+      if (navigationBlocked) flash(closeMessage('navigationDirty', 'Форма содержит несохранённые изменения — переход не выполнен'), 'err');
     } catch (e) {
       // A lost/unparseable response for /new may hide a committed insert and
       // there is no identity with which to issue another safe write. Fence all
