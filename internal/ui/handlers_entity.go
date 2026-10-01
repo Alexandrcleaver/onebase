@@ -647,6 +647,107 @@ func formatDateValueForInput(v any) string {
 //
 // Возвращает (nil,...,false) если запрос отклонён (нет прав / ошибка парсинга);
 // в этом случае ответ уже записан в w.
+// dropAdminOnlyFields убирает из присланных значений поля, которые форма
+// объявила editable_admin_only, когда запись ведёт не администратор.
+// Возвращает имена отброшенных полей — по ним удобно писать тесты и, при
+// необходимости, журналировать попытку.
+func dropAdminOnlyFields(form *metadata.FormModule, fields map[string]any, admin bool) []string {
+	if form == nil || admin {
+		return nil
+	}
+	var dropped []string
+	form.Walk(func(el *metadata.FormElement) bool {
+		if el == nil || !el.EditableAdminOnly {
+			return true
+		}
+		name := formElementFieldName(el.DataPath)
+		if name == "" {
+			return true
+		}
+		found := false
+		for key := range fields {
+			if strings.EqualFold(key, name) {
+				delete(fields, key)
+				dropped = append(dropped, key)
+				found = true
+			}
+		}
+		// Служебный ключ объекта (parent_id, is_folder) в entity.Fields не
+		// объявлен: formToFields его не приносит, и удалять в карте нечего.
+		// Вернуть его всё равно обязаны — иначе подделанное значение доедет до
+		// объекта следующим mergeSubmittedEntityServiceFields, и запрет, который
+		// форма показала запертым контролом, снимался бы обычным POST
+		// неадминистратора. Запрет серверный: disabled в браузере защитой не
+		// считается.
+		if !found && isEntityServiceFormKey(name) {
+			dropped = append(dropped, name)
+		}
+		return true
+	})
+	return dropped
+}
+
+// entityServiceFormKeys — служебные ключи объекта, которые submit принимает из
+// формы помимо entity.Fields: их переносит mergeSubmittedEntityServiceFields.
+// Список один и тот же для переноса и для серверного запрета — иначе
+// editable_admin_only разъехался бы с тем, что форма реально принимает, и
+// запрет на одном ключе молча не действовал бы.
+var entityServiceFormKeys = []string{"parent_id", "is_folder"}
+
+// isEntityServiceFormKey — имя элемента формы совпало со служебным ключом
+// объекта. Регистронезависимо: data_path пишут и «Объект.parent_id», и
+// «Объект.Parent_ID».
+func isEntityServiceFormKey(name string) bool {
+	for _, key := range entityServiceFormKeys {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// removeSubmittedFormFields removes rejected values from every parsed POST map.
+// Default restoration must treat these fields as absent, including multipart
+// form events, rather than interpreting a forged value as an explicit submit.
+func removeSubmittedFormFields(r *http.Request, names []string) {
+	for _, name := range names {
+		for key := range r.Form {
+			if strings.EqualFold(key, name) {
+				delete(r.Form, key)
+			}
+		}
+		for key := range r.PostForm {
+			if strings.EqualFold(key, name) {
+				delete(r.PostForm, key)
+			}
+		}
+		if r.MultipartForm != nil {
+			for key := range r.MultipartForm.Value {
+				if strings.EqualFold(key, name) {
+					delete(r.MultipartForm.Value, key)
+				}
+			}
+			for key := range r.MultipartForm.File {
+				if strings.EqualFold(key, name) {
+					delete(r.MultipartForm.File, key)
+				}
+			}
+		}
+	}
+}
+
+// formElementFieldName — реквизит записи из двухсегментного data_path
+// «Объект.<Реквизит>». Для пути другой формы возвращает пустую строку:
+// колонку табличной части и реквизит формы этот путь не запирает, и check
+// такое сочетание отклоняет.
+func formElementFieldName(path string) string {
+	parts := strings.Split(strings.TrimSpace(path), ".")
+	if len(parts) != 2 || !strings.EqualFold(strings.TrimSpace(parts[0]), "Объект") {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
 func (s *Server) parseSubmitForm(w http.ResponseWriter, r *http.Request, entity *metadata.Entity, existingID *uuid.UUID) (
 	obj *runtime.Object, fields map[string]any, tpRows map[string][]map[string]any, action string, ok bool,
 ) {
@@ -703,6 +804,12 @@ func (s *Server) parseSubmitForm(w http.ResponseWriter, r *http.Request, entity 
 		s.renderObjectFormBadRequest(w, r, entity, existingID == nil, fieldsErr.Error(), tpRows)
 		return
 	}
+	// editable_admin_only: значения запертых полей отбрасываем ЗДЕСЬ, на сервере.
+	// Разметка запрета — подсказка интерфейсу, а не защита: POST её не
+	// спрашивает, и без этого запрет снимался бы подделанной формой или любым
+	// клиентом. Удаляем ключ и из полей объекта, и из признаков отправки:
+	// у существующей записи остаётся прежнее значение, у новой — умолчание.
+	removeSubmittedFormFields(r, dropAdminOnlyFields(form, fields, s.isAdmin(r)))
 
 	mergeSubmittedEntityServiceFields(r, entity, fields)
 
@@ -755,11 +862,16 @@ func mergeSubmittedEntityServiceFields(r *http.Request, entity *metadata.Entity,
 		return
 	}
 	submitted := submittedFormKeys(r)
-	if formKeySubmitted(submitted, "parent_id") {
-		fields["parent_id"] = r.FormValue("parent_id") //nolint:gosec // caller applies the entity-specific body limit
-	}
-	if formKeySubmitted(submitted, "is_folder") {
-		fields["is_folder"] = r.FormValue("is_folder") == "true" //nolint:gosec // caller applies the entity-specific body limit
+	for _, key := range entityServiceFormKeys {
+		if !formKeySubmitted(submitted, key) {
+			continue
+		}
+		switch key {
+		case "parent_id":
+			fields[key] = r.FormValue(key) //nolint:gosec // caller applies the entity-specific body limit
+		case "is_folder":
+			fields[key] = r.FormValue(key) == "true" //nolint:gosec // caller applies the entity-specific body limit
+		}
 	}
 }
 
@@ -1084,6 +1196,7 @@ func (s *Server) refOptionsJSON(w http.ResponseWriter, r *http.Request) {
 		extra := base
 		if choice != nil {
 			extra.ChoicePredicates = choice.Predicates
+			extra.IncludeFolders = choice.Folders
 		}
 		items, total, err = s.referenceOptionsPageWithParams(r.Context(), ent, r.URL.Query().Get("q"), limit, offset, extra)
 		if err != nil {
@@ -1112,6 +1225,7 @@ func (s *Server) refOptionsJSON(w http.ResponseWriter, r *http.Request) {
 		if !choice.Empty && fltOK {
 			check := base
 			check.ChoicePredicates = choice.Predicates
+			check.IncludeFolders = choice.Folders
 			allowed, err = s.choiceSelectedAllowedWithParams(r.Context(), ent, *choice.Selected, check)
 			if err != nil {
 				s.serverError(w, r, err)
@@ -2301,27 +2415,11 @@ func (s *Server) saveMovements(ctx context.Context, docType string, docID uuid.U
 	return nil
 }
 
-// setPeriodFromFields sets the movements period from the first date field of the document.
+// setPeriodFromFields ставит период движений по дате документа — тем же
+// правилом, что entityservice: у DSL-пути и списка своей копии больше нет,
+// иначе правило «какая дата — дата документа» разъехалось бы между путями.
 func setPeriodFromFields(mc *runtime.MovementsCollector, entity *metadata.Entity, fields map[string]any) {
-	for _, f := range entity.Fields {
-		if f.Type != metadata.FieldTypeDate {
-			continue
-		}
-		// Регистронезависимый поиск: ключи Fields бывают и в PascalCase
-		// (formToFields / GetByID), и в lower-case (после Object.Set).
-		// Прямой fields[f.Name] промахивался на пути submit → period = time.Now().
-		low := strings.ToLower(f.Name)
-		for k, v := range fields {
-			if strings.ToLower(k) != low {
-				continue
-			}
-			if t := runtime.AsTime(v); !t.IsZero() {
-				mc.SetPeriod(t)
-			}
-			break
-		}
-		return
-	}
+	entityservice.SetPeriodFromFields(mc, entity, fields)
 }
 
 // saveTablePartsDirect persists tablepart rows from the provided map (possibly modified by DSL).
