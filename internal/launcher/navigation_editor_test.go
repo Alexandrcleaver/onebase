@@ -5,14 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/ivantit66/onebase/internal/auth"
 	"github.com/ivantit66/onebase/internal/configdb"
 	"github.com/ivantit66/onebase/internal/i18n"
 	"github.com/ivantit66/onebase/internal/metadata"
@@ -103,6 +107,141 @@ func newNavigationEditorFixture(t *testing.T, mode, subPath string) (*handler, *
 		}
 	}
 	return h, b
+}
+
+// These requests use ListenAndServe's actual route table, authentication and
+// write guards. A test-only copy of a route cannot prove access protection.
+func TestNavigationEditorProductionRoutesAndOldForms(t *testing.T) {
+	for _, mode := range []string{"file", "database"} {
+		t.Run(mode, func(t *testing.T) {
+			h, b := newNavigationEditorFixture(t, mode, "subsystems/school.yaml")
+			db, err := OpenDB(context.Background(), b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo := auth.NewRepo(db)
+			if err := repo.EnsureSchema(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			tokens := map[string]string{}
+			for _, role := range []string{"admin", "ordinary"} {
+				user, err := repo.Create(context.Background(), role, "Str0ng-Passw0rd!", role, role == "admin")
+				if err != nil {
+					t.Fatal(err)
+				}
+				token, err := repo.CreateSession(context.Background(), user.ID, auth.SessionMeta{Kind: auth.SessionKindConfigurator})
+				if err != nil {
+					t.Fatal(err)
+				}
+				tokens[role] = token
+			}
+			db.Close()
+			srv, err := NewServer(h.store, h.runner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- srv.ListenAndServe() }()
+			t.Cleanup(func() { srv.Close(); <-done })
+			client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			call := func(method, path, body, contentType, role string) (int, string) {
+				t.Helper()
+				r, err := http.NewRequest(method, srv.URL()+"/bases/test/configurator"+path, strings.NewReader(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.Header.Set("Content-Type", contentType)
+				r.Header.Set("Accept-Language", "en")
+				if token := tokens[role]; token != "" {
+					r.AddCookie(&http.Cookie{Name: configuratorSessionCookieName, Value: token})
+				}
+				res, err := client.Do(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = res.Body.Close() }()
+				raw, err := io.ReadAll(res.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return res.StatusCode, string(raw)
+			}
+			data := readNavigationEditorData(t, navigationEditorHTTP(h, http.MethodGet, "?subsystem=School", ""))
+			body := navigationEditorBody(t, "School", data.Menu)
+			for _, role := range []string{"", "ordinary"} {
+				for _, path := range []string{"/navigation?subsystem=School", "/navigation/preview", "/navigation/save"} {
+					method := http.MethodPost
+					if strings.Contains(path, "?") {
+						method = http.MethodGet
+					}
+					code, _ := call(method, path, body, "application/json", role)
+					if code != http.StatusFound {
+						t.Fatalf("%q %s: auth status %d", role, path, code)
+					}
+				}
+			}
+			raw, _ := h.readConfigFileRaw(context.Background(), b, "subsystems/school.yaml")
+			if string(raw) != navigationEditorFixture {
+				t.Fatal("unauthorized request changed YAML")
+			}
+			code, html := call(http.MethodGet, "/navigation?subsystem=School", "", "", "admin")
+			if code != 200 || !strings.Contains(html, "Menu editor") || !strings.Contains(html, "/static/navigation-editor.js") {
+				t.Fatalf("editor page %d: %s", code, html)
+			}
+			for _, path := range []string{"/navigation/preview", "/navigation/save"} {
+				if code, text := call(http.MethodPost, path, body, "application/json", "admin"); code != 200 {
+					t.Fatalf("admin %s: %d %s", path, code, text)
+				}
+			}
+			before, _ := h.readConfigFileRaw(context.Background(), b, "subsystems/school.yaml")
+			if code, _ := call(http.MethodPost, "/navigation/save", body, "application/x-www-form-urlencoded", "admin"); code != 400 {
+				t.Fatalf("JSON accepted as form: %d", code)
+			}
+			after, _ := h.readConfigFileRaw(context.Background(), b, "subsystems/school.yaml")
+			if !bytes.Equal(before, after) {
+				t.Fatal("wrong content type changed YAML")
+			}
+			form := url.Values{"subsystem_name": {"School"}, "title": {"Updated school"}, "catalogs": {"B", "A"}, "documents": {"Order"}}.Encode()
+			if code, text := call(http.MethodPost, "/subsystem", form, "application/x-www-form-urlencoded", "admin"); code != 200 {
+				t.Fatalf("old subsystem form: %d %s", code, text)
+			}
+			raw, _ = h.readConfigFileRaw(context.Background(), b, "subsystems/school.yaml")
+			for _, text := range []string{"id: education", "en: English education", "# item B travels with this comment", "future_flag: preserve"} {
+				if !strings.Contains(string(raw), text) {
+					t.Fatalf("old subsystem form lost %q", text)
+				}
+			}
+			global := readNavigationEditorData(t, navigationEditorHTTP(h, http.MethodGet, "", ""))
+			global.Menu.Sections[0].Title, global.Menu.Sections[0].Icon = "Dashboard menu", "home"
+			if code, text := call(http.MethodPost, "/navigation/save", navigationEditorBody(t, "", global.Menu), "application/json", "admin"); code != 200 {
+				t.Fatalf("global save: %d %s", code, text)
+			}
+			if code, text := call(http.MethodPost, "/home-page", "home_title=New+dashboard", "application/x-www-form-urlencoded", "admin"); code != 200 {
+				t.Fatalf("old home form: %d %s", code, text)
+			}
+			raw, _ = h.readConfigFileRaw(context.Background(), b, "config/home_page.yaml")
+			for _, text := range []string{"# dashboard comment", "future_home: preserve", "en: English home", "catalogs: [A]", "title: Dashboard menu", "icon: home", "id: home-a"} {
+				if !strings.Contains(string(raw), text) {
+					t.Fatalf("old home form lost %q:\n%s", text, raw)
+				}
+			}
+			if mode == "file" {
+				node, err := exec.LookPath("node")
+				if err != nil {
+					t.Skip("node is not installed")
+				}
+				path := filepath.Join(t.TempDir(), "navigation-editor.html")
+				if err := os.WriteFile(path, []byte(html), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command(node, "--test", "navigation_editor_behavior_test.js") //nolint:gosec // Test-only executable resolved with LookPath.
+				cmd.Env = append(os.Environ(), "ONEBASE_NAVIGATION_EDITOR_HTML="+path)
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("production editor behavior: %v\n%s", err, output)
+				}
+			}
+		})
+	}
 }
 
 // Exercise HTTP routing and JSON boundaries, not a private YAML transformer.
@@ -242,6 +381,66 @@ func TestNavigationEditorBadBodiesDoNotWrite(t *testing.T) {
 				raw, _ := h.readConfigFileRaw(context.Background(), b, "subsystems/school.yaml")
 				if string(raw) != navigationEditorFixture {
 					t.Fatalf("case %d changed YAML", i)
+				}
+			}
+		})
+	}
+}
+
+func TestNavigationEditorFlatImportAndAliases(t *testing.T) {
+	for _, mode := range []string{"file", "database"} {
+		t.Run(mode, func(t *testing.T) {
+			h, b := newNavigationEditorFixture(t, mode, "subsystems/school.yaml")
+			ctx := context.Background()
+			global := []byte("# global dashboard\ntitle: Home\n")
+			if err := h.writeConfigFileRaw(ctx, b, "config/home_page.yaml", global); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.writeConfigFileRaw(ctx, b, "registers/attendance.yaml", []byte("name: Attendance\ndimensions: []\nresources: []\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.saveTreeOrderGroupFor(ctx, b, "catalogs", []string{"B", "A"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.saveTreeOrderGroupFor(ctx, b, "groups", []string{"documents", "catalogs"}); err != nil {
+				t.Fatal(err)
+			}
+			legacy := readNavigationEditorData(t, navigationEditorHTTP(h, http.MethodGet, "?import=legacy", ""))
+			tree := readNavigationEditorData(t, navigationEditorHTTP(h, http.MethodGet, "?import=tree-order", ""))
+			if tree.Menu.Sections[0].Items[0].Target != "document:Order" || tree.Menu.Sections[1].Items[0].Target != "catalog:B" {
+				t.Fatalf("tree hint ignored: %+v", tree.Menu)
+			}
+			if legacy.Menu.Sections[0].Items[0].Target != "catalog:A" {
+				t.Fatalf("legacy flat order changed: %+v", legacy.Menu)
+			}
+			targets := map[string]bool{}
+			for _, section := range tree.Menu.Sections {
+				for _, item := range section.Items {
+					targets[item.Target] = true
+				}
+			}
+			if !targets["register:Attendance:movements"] || !targets["register:Attendance:balances"] {
+				t.Fatalf("register views lost: %+v", targets)
+			}
+			raw, _ := h.readConfigFileRaw(ctx, b, "config/home_page.yaml")
+			if !bytes.Equal(raw, global) {
+				t.Fatal("flat import wrote YAML")
+			}
+			readNavigationEditorData(t, navigationEditorHTTP(h, http.MethodPost, "/save", navigationEditorBody(t, "", tree.Menu)))
+			for _, original := range []string{
+				"title: Home\nmenu: &shared\n  sections: []\nexternal: *shared\n",
+				"title: Home\ndefaults: &shared\n  menu:\n    sections: []\n<<: *shared\n",
+			} {
+				if err := h.writeConfigFileRaw(ctx, b, "config/home_page.yaml", []byte(original)); err != nil {
+					t.Fatal(err)
+				}
+				rec := navigationEditorHTTP(h, http.MethodPost, "/save", navigationEditorBody(t, "", tree.Menu))
+				if rec.Code != 400 {
+					t.Fatalf("shared YAML menu accepted: %d %s", rec.Code, rec.Body.String())
+				}
+				raw, _ := h.readConfigFileRaw(ctx, b, "config/home_page.yaml")
+				if string(raw) != original {
+					t.Fatal("failed alias save changed graph")
 				}
 			}
 		})

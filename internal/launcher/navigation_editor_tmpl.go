@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"html/template"
 	"net/http"
+
+	"github.com/ivantit66/onebase/internal/ui"
 )
 
 var navigationEditorTmpl = template.Must(template.New("navigation-editor").Funcs(template.FuncMap{
@@ -17,7 +19,10 @@ var navigationEditorTmpl = template.Must(template.New("navigation-editor").Funcs
 func renderNavigationEditor(w http.ResponseWriter, d navigationEditorData) {
 	page := struct {
 		navigationEditorData
-		Labels map[string]string `json:"labels"`
+		Labels      map[string]string `json:"labels"`
+		IconSprite  string            `json:"icon_sprite"`
+		IconNames   []string          `json:"icon_names"`
+		IconAliases json.RawMessage   `json:"icon_aliases"`
 	}{d, map[string]string{
 		"newSection": tr(d.Lang, "Новый раздел"), "newGroup": tr(d.Lang, "Новая папка"),
 		"select": tr(d.Lang, "Выбрать"), "add": tr(d.Lang, "Добавить в меню"),
@@ -33,7 +38,7 @@ func renderNavigationEditor(w http.ResponseWriter, d navigationEditorData) {
 		"translationHint": tr(d.Lang, "Переводы имеют приоритет при просмотре на соответствующем языке."),
 		"unexpected":      tr(d.Lang, "Неожиданный ответ сервера"),
 		"unsaved":         tr(d.Lang, "Изменения меню не сохранены"),
-	}}
+	}, ui.LucideSpriteURL(), ui.LucideNames(), json.RawMessage(ui.LucideAliasesJSON())}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := navigationEditorTmpl.Execute(w, page); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
