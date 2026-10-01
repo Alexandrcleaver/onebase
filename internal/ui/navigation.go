@@ -7,8 +7,10 @@ import (
 	"sort"
 
 	"github.com/ivantit66/onebase/internal/auth"
+	"github.com/ivantit66/onebase/internal/i18n"
 	"github.com/ivantit66/onebase/internal/metadata"
 	"github.com/ivantit66/onebase/internal/navigation"
+	"github.com/ivantit66/onebase/internal/runtime"
 )
 
 type navItem struct {
@@ -72,40 +74,41 @@ func (s *Server) buildFlatNav(r *http.Request) []navGroup {
 	return s.buildNavigation(r, nil, nil, true, "")
 }
 
-// navigationObjects keeps raw metadata titles separate from translations;
+// NavigationObjects keeps raw metadata titles separate from translations;
 // choosing the Russian display name here would corrupt other-language fallback.
-func (s *Server) navigationObjects() []navigation.Object {
+// The configurator uses this same projection for its permitted object palette.
+func NavigationObjects(reg *runtime.Registry) []navigation.Object {
 	var objects []navigation.Object
 	add := func(kind, name, title string, titles map[string]string) {
 		objects = append(objects, navigation.Object{Target: navigation.Target{Kind: kind, Name: name}, Title: title, Titles: titles})
 	}
-	for _, e := range s.reg.Entities() {
+	for _, e := range reg.Entities() {
 		add(string(e.Kind), e.Name, e.DisplayName(""), e.Titles)
 	}
-	for _, o := range s.reg.Registers() {
+	for _, o := range reg.Registers() {
 		for _, view := range []string{"movements", "balances"} {
 			objects = append(objects, navigation.Object{Target: navigation.Target{Kind: "register", Name: o.Name, View: view}, Title: o.DisplayName(""), Titles: o.Titles})
 		}
 	}
-	for _, o := range s.reg.InfoRegisters() {
+	for _, o := range reg.InfoRegisters() {
 		add("inforeg", o.Name, o.DisplayName(""), o.Titles)
 		objects[len(objects)-1].Periodic = o.Periodic
 	}
-	for _, o := range s.reg.Reports() {
+	for _, o := range reg.Reports() {
 		add("report", o.Name, o.DisplayName(""), o.Titles)
 		objects[len(objects)-1].External = o.External
 	}
-	for _, o := range s.reg.Processors() {
+	for _, o := range reg.Processors() {
 		add("processor", o.Name, o.DisplayName(""), o.Titles)
 		objects[len(objects)-1].External, objects[len(objects)-1].Trusted = o.External, o.Trusted
 	}
-	for _, o := range s.reg.Journals() {
+	for _, o := range reg.Journals() {
 		add("journal", o.Name, o.DisplayName(""), o.Titles)
 	}
-	for _, o := range s.reg.Pages() {
+	for _, o := range reg.Pages() {
 		add("page", o.Name, o.DisplayName(""), o.Titles)
 	}
-	if len(s.reg.Constants()) > 0 {
+	if len(reg.Constants()) > 0 {
 		add("system", "constants", "Константы", nil)
 	}
 	return objects
@@ -113,7 +116,7 @@ func (s *Server) navigationObjects() []navigation.Object {
 
 func (s *Server) buildNavigation(r *http.Request, menu *metadata.Menu, contents *metadata.SubsystemContents, global bool, sub string) []navGroup {
 	context := navContext(sub)
-	scope := navigation.NewScope(s.navigationObjects(), contents, global)
+	scope := navigation.NewScope(NavigationObjects(s.reg), contents, global)
 	tree, diagnostics := navigation.Normalize(context, menu, scope)
 	for _, diagnostic := range diagnostics {
 		if !diagnostic.Warning {
@@ -169,6 +172,55 @@ func (s *Server) buildNavigation(r *http.Request, menu *metadata.Menu, contents 
 		}
 	}
 	return output
+}
+
+// NavigationPreviewItem is an already resolved, permission-filtered menu entry.
+type NavigationPreviewItem struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	URL   string `json:"url"`
+	Icon  string `json:"icon,omitempty"`
+}
+
+type NavigationPreviewGroup struct {
+	ID    string                  `json:"id"`
+	Title string                  `json:"title"`
+	Icon  string                  `json:"icon,omitempty"`
+	Items []NavigationPreviewItem `json:"items"`
+}
+
+type NavigationPreviewSection struct {
+	ID     string                   `json:"id"`
+	Title  string                   `json:"title"`
+	Icon   string                   `json:"icon,omitempty"`
+	Items  []NavigationPreviewItem  `json:"items"`
+	Groups []NavigationPreviewGroup `json:"groups"`
+}
+
+// AdminNavigationPreview renders a configurator draft through the production
+// resolver and RBAC path, without opening a database or starting an application.
+// Its caller must enforce configurator administrator authentication; this is
+// deliberately an administrator preview, not a user's effective navigation.
+func AdminNavigationPreview(reg *runtime.Registry, menu *metadata.Menu, contents *metadata.SubsystemContents, global bool, sub, lang string, bundle *i18n.Bundle) []NavigationPreviewSection {
+	r, _ := http.NewRequest(http.MethodGet, "/", nil)
+	r = r.WithContext(auth.ContextWithUser(r.Context(), &auth.User{IsAdmin: true, Lang: lang}))
+	s := &Server{reg: reg, cfg: Config{Bundle: bundle, Lang: lang}}
+	items := func(input []navItem) []NavigationPreviewItem {
+		out := make([]NavigationPreviewItem, 0, len(input))
+		for _, item := range input {
+			out = append(out, NavigationPreviewItem{ID: item.ID, Label: item.Label, URL: item.URL, Icon: item.Icon})
+		}
+		return out
+	}
+	out := []NavigationPreviewSection{}
+	for _, section := range s.buildNavigation(r, menu, contents, global, sub) {
+		next := NavigationPreviewSection{ID: section.ID, Title: section.Kind, Icon: section.Icon, Items: items(section.Items), Groups: []NavigationPreviewGroup{}}
+		for _, group := range section.Groups {
+			next.Groups = append(next.Groups, NavigationPreviewGroup{ID: group.ID, Title: group.Kind, Icon: group.Icon, Items: items(group.Items)})
+		}
+		out = append(out, next)
+	}
+	return out
 }
 
 func (s *Server) navigationItemVisible(r *http.Request, object navigation.Object, resolved navigation.ResolvedItem, semantic, flat bool) bool {
