@@ -319,3 +319,100 @@ func usersRefID(v any) string {
 	}
 	return fmt.Sprint(v)
 }
+
+// Квалифицированный путь «З.Автор.Логин» — такой же самостоятельный элемент
+// выборки, как неквалифицированный «Автор.Логин»: имя колонки результата берёт
+// имя реквизита, а не колонку _users. Раньше квалификатор источника сбивал
+// определение границ элемента, колонка приезжала как login/full_name (а
+// Наименование — целым SQL-выражением COALESCE), Выборка.Логин её не находила,
+// и «УПОРЯДОЧИТЬ ПО Логин» падал на «no such column: логин».
+func TestUsersRefQualifiedPathNamesColumnByAttribute(t *testing.T) {
+	dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+		ctx := context.Background()
+		repo := auth.NewRepo(db)
+		if err := repo.EnsureSchema(ctx); err != nil {
+			t.Fatalf("EnsureSchema: %v", err)
+		}
+		ivanov, err := repo.Create(ctx, "ivanov", "пароль-123456", "Иванов И.И.", true)
+		if err != nil {
+			t.Fatalf("Create ivanov: %v", err)
+		}
+		petrov, err := repo.Create(ctx, "petrov", "пароль-654321", "", false)
+		if err != nil {
+			t.Fatalf("Create petrov: %v", err)
+		}
+		заявка := usersRefEntity()
+		if err := db.Migrate(ctx, []*metadata.Entity{заявка}); err != nil {
+			t.Fatalf("Migrate: %v", err)
+		}
+		for номер, автор := range map[string]string{"0001": ivanov.ID, "0002": petrov.ID} {
+			if err := db.Upsert(ctx, заявка.Name, uuid.New(), map[string]any{"Номер": номер, "Автор": автор}, заявка); err != nil {
+				t.Fatalf("Upsert %s: %v", номер, err)
+			}
+		}
+		run := func(text string) []map[string]any {
+			t.Helper()
+			compiled, err := query.Compile(text, query.CompileOpts{Dialect: db.Dialect(), Entities: []*metadata.Entity{заявка}})
+			if err != nil {
+				t.Fatalf("%s: компиляция: %v", text, err)
+			}
+			rows, _, err := query.Run(ctx, db, &compiled)
+			if err != nil {
+				t.Fatalf("%s: выполнение: %v\nSQL: %s", text, err, compiled.SQL)
+			}
+			return rows
+		}
+
+		// Имя колонки — по имени реквизита, как написано в запросе.
+		for _, c := range []struct{ text, col, want string }{
+			{`ВЫБРАТЬ З.Автор.Логин ИЗ Документ.Заявка КАК З УПОРЯДОЧИТЬ ПО З.Номер`, "логин", "ivanov"},
+			{`ВЫБРАТЬ З.Автор.ПолноеИмя ИЗ Документ.Заявка КАК З УПОРЯДОЧИТЬ ПО З.Номер`, "полноеимя", "Иванов И.И."},
+			{`ВЫБРАТЬ З.Автор.Наименование ИЗ Документ.Заявка КАК З УПОРЯДОЧИТЬ ПО З.Номер`, "наименование", "Иванов И.И."},
+			// Явное КАК по-прежнему главнее неявного имени.
+			{`ВЫБРАТЬ З.Автор.Логин КАК Л ИЗ Документ.Заявка КАК З УПОРЯДОЧИТЬ ПО З.Номер`, "л", "ivanov"},
+			// Не первый и не единственный элемент списка выборки.
+			{`ВЫБРАТЬ З.Номер, З.Автор.Логин, З.Автор.ПолноеИмя ИЗ Документ.Заявка КАК З УПОРЯДОЧИТЬ ПО З.Номер`, "логин", "ivanov"},
+		} {
+			rows := run(c.text)
+			if len(rows) != 2 {
+				t.Fatalf("%s: строк %d, ожидалось 2: %v", c.text, len(rows), rows)
+			}
+			if _, ok := rows[0][c.col]; !ok {
+				t.Fatalf("%s: колонка %q не названа именем реквизита: %v", c.text, c.col, rows[0])
+			}
+			if got := fmt.Sprint(rows[0][c.col]); got != c.want {
+				t.Errorf("%s: %s = %q, want %q (row %v)", c.text, c.col, got, c.want, rows[0])
+			}
+		}
+
+		// Сортировка по неявному имени: «УПОРЯДОЧИТЬ ПО Логин» видит алиас вывода.
+		ordered := run(`ВЫБРАТЬ З.Автор.Логин ИЗ Документ.Заявка КАК З УПОРЯДОЧИТЬ ПО Логин`)
+		if len(ordered) != 2 {
+			t.Fatalf("УПОРЯДОЧИТЬ ПО Логин: строк %d, ожидалось 2: %v", len(ordered), ordered)
+		}
+		if got := fmt.Sprint(ordered[0]["логин"]); got != "ivanov" {
+			t.Errorf("УПОРЯДОЧИТЬ ПО Логин: первая строка %q, want %q (rows %v)", got, "ivanov", ordered)
+		}
+
+		// В выражении и в аргументе агрегата имени быть не должно: «MAX(x AS л)»
+		// не разбирается ни одной СУБД.
+		for _, text := range []string{
+			`ВЫБРАТЬ МАКСИМУМ(З.Автор.Логин) КАК Л ИЗ Документ.Заявка КАК З`,
+			`ВЫБРАТЬ З.Автор.Логин + "!" КАК Л ИЗ Документ.Заявка КАК З`,
+		} {
+			if rows := run(text); len(rows) == 0 {
+				t.Errorf("%s: строк 0", text)
+			}
+		}
+
+		// Служебные колонки _users в ответе не появляются ни под каким именем.
+		for _, row := range run(`ВЫБРАТЬ З.Номер, З.Автор.Логин, З.Автор.ПолноеИмя, З.Автор.Наименование ИЗ Документ.Заявка КАК З`) {
+			for col := range row {
+				switch col {
+				case "login", "full_name", "password_hash", "totp_secret", "is_admin", "auth_subject", "id":
+					t.Errorf("служебная колонка _users в ответе: %q (row %v)", col, row)
+				}
+			}
+		}
+	})
+}

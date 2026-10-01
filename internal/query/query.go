@@ -716,7 +716,7 @@ func (tr *translator) emitSystemRefAttribute(rd *refDimInfo, qpos int, name stri
 	}
 	tr.parts = tr.parts[:len(tr.parts)-2]
 	tr.emit(expr)
-	if tr.section == sectionSelect && tr.standaloneSelectItem(qpos, qpos+3) {
+	if tr.section == sectionSelect && tr.standaloneSelectItem(tr.systemRefPathStart(qpos), qpos+3) {
 		if p := upperFast(tr.peek(0).val); p != "КАК" && p != "AS" {
 			alias := lowerFast(name)
 			tr.emit("AS")
@@ -725,6 +725,25 @@ func (tr *translator) emitSystemRefAttribute(rd *refDimInfo, qpos int, name stri
 		}
 	}
 	return nil
+}
+
+// systemRefPathStart — первый токен пути к реквизиту учётной записи: сам
+// ссылочный реквизит либо квалификатор источника перед ним. Квалификатор
+// («З» в «З.Автор.Логин») к этому моменту уже срезан из вывода
+// (dropSourceQualifier): реквизит берётся из псевдонима авто-JOIN. В токенах
+// он остался, и без него границы самостоятельного элемента выборки считались
+// от «Автор»: перед ним стояла точка, элемент признавался частью выражения и
+// терял неявное имя колонки — «ВЫБРАТЬ З.Автор.Логин» отдавал login,
+// ПолноеИмя — full_name, Наименование — целое выражение COALESCE, а
+// «УПОРЯДОЧИТЬ ПО Логин» падало на no such column. Дотянуться до
+// квалификатора безопасно: без него путь не доходит сюда с точкой перед
+// реквизитом, а глубже одного перехода навигация отклоняется
+// (assertSingleHopNavigation).
+func (tr *translator) systemRefPathStart(qpos int) int {
+	if qpos >= 2 && tr.tokens[qpos-1].kind == tDot && tr.tokens[qpos-2].kind == tIdent {
+		return qpos - 2
+	}
+	return qpos
 }
 
 // systemRefByJoinAlias — ссылочный реквизит на учётные записи, чей псевдоним
