@@ -41,7 +41,7 @@ func navigationObjects(p *project.Project) []navigation.Object {
 		add("page", r.Name, r.DisplayName(""), r.Titles)
 	}
 	if len(p.Constants) > 0 {
-		add("system", "constants", "Константы", map[string]string{"en": "Constants"})
+		add("system", "constants", "Константы", nil)
 	}
 	return objects
 }
