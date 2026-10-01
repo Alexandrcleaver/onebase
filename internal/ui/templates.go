@@ -2398,7 +2398,7 @@ const tplForm = `
       {{end}}
     </select>
   {{else if eq (str .Type) "date"}}
-    <input type="datetime-local" name="{{$fn}}" value="{{index $.Values $fn}}"{{if $ro}} readonly{{end}}>
+    <input type="datetime-local" step="1" name="{{$fn}}" value="{{index $.Values $fn}}"{{if $ro}} readonly{{end}}>
   {{else if eq (str .Type) "bool"}}
     {{if $ro}}<input type="hidden" name="{{$fn}}" value="{{index $.Values $fn}}">{{end}}
     <select{{if not $ro}} name="{{$fn}}"{{end}}{{if $ro}} disabled{{end}}>
