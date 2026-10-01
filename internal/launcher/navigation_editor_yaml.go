@@ -50,22 +50,57 @@ func setNavigationMenuYAML(doc *yaml.Node, menu *metadata.Menu) error {
 		return nil
 	}
 	byID := map[string]*yaml.Node{}
-	var collect func(*yaml.Node)
-	collect = func(n *yaml.Node) {
-		if id := navigationYAMLNodeID(n); id != "" {
+	var collect func(*yaml.Node, navigationYAMLRole)
+	collect = func(n *yaml.Node, role navigationYAMLRole) {
+		if n == nil || role == navigationYAMLValue {
+			return
+		}
+		if id := navigationYAMLNodeID(n, role); id != "" {
 			byID[id] = n
 		}
-		for _, child := range n.Content {
-			collect(child)
+		switch n.Kind {
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				collect(n.Content[i+1], navigationYAMLChildRole(role, n.Content[i].Value))
+			}
+		case yaml.SequenceNode:
+			for _, child := range n.Content {
+				collect(child, role)
+			}
 		}
 	}
-	collect(old)
-	doc.Content[index+1] = reconcileNavigationYAML(old, &fresh, byID)
+	collect(old, navigationYAMLMenu)
+	doc.Content[index+1] = reconcileNavigationYAML(old, &fresh, byID, navigationYAMLMenu)
 	return nil
 }
 
-func navigationYAMLNodeID(n *yaml.Node) string {
-	if n == nil || n.Kind != yaml.MappingNode {
+// Only typed positions carry menu identity. In particular, titles.id is an
+// Indonesian translation, even when its value equals a section/group/item ID.
+type navigationYAMLRole uint8
+
+const (
+	navigationYAMLValue navigationYAMLRole = iota
+	navigationYAMLMenu
+	navigationYAMLSection
+	navigationYAMLGroup
+	navigationYAMLItem
+)
+
+func navigationYAMLChildRole(parent navigationYAMLRole, field string) navigationYAMLRole {
+	switch {
+	case parent == navigationYAMLMenu && field == "sections":
+		return navigationYAMLSection
+	case parent == navigationYAMLSection && field == "groups":
+		return navigationYAMLGroup
+	case (parent == navigationYAMLSection || parent == navigationYAMLGroup) && field == "items":
+		return navigationYAMLItem
+	default:
+		return navigationYAMLValue
+	}
+}
+
+func navigationYAMLNodeID(n *yaml.Node, role navigationYAMLRole) string {
+	if n == nil || n.Kind != yaml.MappingNode || (role != navigationYAMLSection && role != navigationYAMLGroup && role != navigationYAMLItem) {
 		return ""
 	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
@@ -76,8 +111,8 @@ func navigationYAMLNodeID(n *yaml.Node) string {
 	return ""
 }
 
-func reconcileNavigationYAML(old, fresh *yaml.Node, byID map[string]*yaml.Node) *yaml.Node {
-	if id := navigationYAMLNodeID(fresh); id != "" {
+func reconcileNavigationYAML(old, fresh *yaml.Node, byID map[string]*yaml.Node, role navigationYAMLRole) *yaml.Node {
+	if id := navigationYAMLNodeID(fresh, role); id != "" {
 		old = byID[id]
 	}
 	if old == nil {
@@ -105,13 +140,13 @@ func reconcileNavigationYAML(old, fresh *yaml.Node, byID map[string]*yaml.Node) 
 			if j, ok := fields[key.Value]; ok {
 				key, previous = old.Content[j], old.Content[j+1]
 			}
-			content = append(content, key, reconcileNavigationYAML(previous, value, byID))
+			content = append(content, key, reconcileNavigationYAML(previous, value, byID, navigationYAMLChildRole(role, key.Value)))
 		}
 		old.Content = content
 	case yaml.SequenceNode:
 		content := make([]*yaml.Node, 0, len(fresh.Content))
 		for _, value := range fresh.Content {
-			content = append(content, reconcileNavigationYAML(nil, value, byID))
+			content = append(content, reconcileNavigationYAML(nil, value, byID, role))
 		}
 		old.Content = content
 	default:
