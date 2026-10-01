@@ -161,12 +161,12 @@ func TestDuplicateOccurrenceAndResolver(t *testing.T) {
 	if first.Label != "Years" || first.URL != "/ui/catalog/Years?subsystem=Education+%26+Science" || first.Action != "read" {
 		t.Fatal(first)
 	}
-	second := navigation.ResolveItem(tree.Sections[0].Items[1], "en", "global", translate, false)
+	second := navigation.ResolveItem(tree.Sections[0].Items[1], "en", "", translate, false)
 	if second.Label != "Custom EN" {
 		t.Fatal(second)
 	}
 	for _, i := range tree.Sections[1].Items {
-		r := navigation.ResolveItem(i, "ru", "global", translate, false)
+		r := navigation.ResolveItem(i, "ru", "", translate, false)
 		if i.Target == "register:Attendance:balances" && r.URL != "/ui/register/attendance/balances" {
 			t.Fatal(r)
 		}
@@ -218,10 +218,10 @@ func TestResolverTranslationOnlyOverrideKeepsDefaultRegisterView(t *testing.T) {
 	}
 	item := tree.Sections[0].Items[0]
 	translate := func(s string) string { return s }
-	if got := navigation.ResolveItem(item, "ru", "global", translate, false).Label; got != "Посещаемость (остатки)" {
+	if got := navigation.ResolveItem(item, "ru", "", translate, false).Label; got != "Посещаемость (остатки)" {
 		t.Fatalf("default register view lost: %s", got)
 	}
-	if got := navigation.ResolveItem(item, "en", "global", translate, false).Label; got != "Available" {
+	if got := navigation.ResolveItem(item, "en", "", translate, false).Label; got != "Available" {
 		t.Fatalf("override lost: %s", got)
 	}
 }
