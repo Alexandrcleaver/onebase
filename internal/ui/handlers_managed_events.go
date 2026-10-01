@@ -1679,7 +1679,14 @@ func (s *Server) managedCloseStateDirty(
 		serviceKeys = append(serviceKeys, "parent_id", "is_folder")
 	}
 	for _, name := range serviceKeys {
-		live, _ := maskCIKeyValue(obj.Fields, name)
+		live, present := maskCIKeyValue(obj.Fields, name)
+		if !present {
+			// Служебные поля дочитывает из базы только жизненный цикл закрытия;
+			// обычное событие формы их не видит вовсе. Отсутствие поля — не
+			// правка обработчика: иначе любой проведённый документ открывался
+			// уже «изменённым» (posted=true в базе против пустоты в форме).
+			continue
+		}
 		stored, _ := maskCIKeyValue(persisted, name)
 		if name == "parent_id" {
 			if refValueString(live) != refValueString(stored) {
@@ -2221,8 +2228,9 @@ func serializeValue(v any) any {
 	case uuid.UUID:
 		return t.String()
 	case time.Time:
-		// input type=datetime-local ожидает ISO 8601 без timezone и без
-		// секунд. Без явного формата time.Time.String() даёт
+		// input type=datetime-local ожидает ISO 8601 без timezone; секунды
+		// едут вместе с датой (dateInputLayout), иначе запись формы их
+		// отрезала бы. Без явного формата time.Time.String() даёт
 		// "2026-05-26 10:00:00 +0300 MSK" — браузер не распознаёт и
 		// очищает значение поля.
 		//
@@ -2231,12 +2239,12 @@ func serializeValue(v any) any {
 		// процесса). Без приведения одна и та же дата давала разные стенные часы
 		// на разных СУБД, а на хосте со смещением от UTC у SQLite съезжал
 		// календарный день (#1077).
-		return t.In(time.Local).Format("2006-01-02T15:04")
+		return t.In(time.Local).Format(dateInputLayout)
 	case *time.Time:
 		if t == nil {
 			return ""
 		}
-		return t.In(time.Local).Format("2006-01-02T15:04")
+		return t.In(time.Local).Format(dateInputLayout)
 	case fmt.Stringer:
 		return t.String()
 	}
