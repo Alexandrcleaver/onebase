@@ -177,8 +177,31 @@ func (c *navigationEditorContext) data(baseID, lang string, menu *metadata.Menu)
 // Import materializes the legacy projection into an editable draft. tree_order
 // is an explicit hint for unordered flat navigation; contents arrays keep their
 // declared order. Neither import path writes configuration or tree_order.
-func (c *navigationEditorContext) importMenu(order map[string][]string) *metadata.Menu {
+func (c *navigationEditorContext) importMenu(order map[string][]string, lang string) *metadata.Menu {
 	sections := c.scope().Sections
+	// Flat legacy navigation sorts translated labels. Import the actual runtime
+	// order for this language before applying explicit configurator hints.
+	if c.global && c.contents.IsEmpty() {
+		for _, group := range ui.AdminNavigationPreview(c.reg, nil, c.contents, true, "", lang, launcherBundle) {
+			positions := map[string]int{}
+			for i, item := range group.Items {
+				positions[item.ID] = i
+			}
+			for i := range sections {
+				if sections[i].ID != group.ID {
+					continue
+				}
+				sort.SliceStable(sections[i].Items, func(a, b int) bool {
+					x, okx := positions[sections[i].Items[a].ID]
+					y, oky := positions[sections[i].Items[b].ID]
+					if okx != oky {
+						return okx
+					}
+					return okx && x < y
+				})
+			}
+		}
+	}
 	groupKeys := map[string]string{"catalog": "catalogs", "document": "documents", "register": "registers",
 		"inforeg": "inforegisters", "report": "reports", "processor": "processors", "journal": "journals", "page": "pages", "system": "constants"}
 	key := func(section navigation.Section) string {
@@ -249,9 +272,9 @@ func (h *handler) configuratorNavigation(w http.ResponseWriter, r *http.Request)
 	switch r.URL.Query().Get("import") {
 	case "":
 	case "legacy":
-		menu = c.importMenu(nil)
+		menu = c.importMenu(nil, lang)
 	case "tree-order":
-		menu = c.importMenu(h.loadTreeOrderFor(r.Context(), b))
+		menu = c.importMenu(h.loadTreeOrderFor(r.Context(), b), lang)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "неизвестный режим импорта"})
 		return

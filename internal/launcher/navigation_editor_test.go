@@ -245,7 +245,7 @@ func TestNavigationEditorProductionRoutesAndOldForms(t *testing.T) {
 }
 
 // Exercise HTTP routing and JSON boundaries, not a private YAML transformer.
-func navigationEditorHTTP(h *handler, method, endpoint, body string) *httptest.ResponseRecorder {
+func navigationEditorHTTP(h *handler, method, endpoint, body string, lang ...string) *httptest.ResponseRecorder {
 	router := chi.NewRouter()
 	router.Get("/bases/{id}/configurator/navigation", h.configuratorNavigation)
 	router.Post("/bases/{id}/configurator/navigation/save", h.configuratorNavigationSave)
@@ -253,6 +253,9 @@ func navigationEditorHTTP(h *handler, method, endpoint, body string) *httptest.R
 	r := httptest.NewRequest(method, "/bases/test/configurator/navigation"+endpoint, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "application/json")
+	if len(lang) > 0 {
+		r.Header.Set("Accept-Language", lang[0])
+	}
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, r)
 	return rec
@@ -427,6 +430,16 @@ func TestNavigationEditorFlatImportAndAliases(t *testing.T) {
 				t.Fatal("flat import wrote YAML")
 			}
 			readNavigationEditorData(t, navigationEditorHTTP(h, http.MethodPost, "/save", navigationEditorBody(t, "", tree.Menu)))
+			if err := h.writeConfigFileRaw(ctx, b, "catalogs/a.yaml", []byte("name: A\ntitle: First\ntitles:\n  en: Zulu\nfields: []\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.writeConfigFileRaw(ctx, b, "catalogs/b.yaml", []byte("name: B\ntitle: Last\ntitles:\n  en: Alpha\nfields: []\n")); err != nil {
+				t.Fatal(err)
+			}
+			english := readNavigationEditorData(t, navigationEditorHTTP(h, http.MethodGet, "?import=legacy", "", "en"))
+			if english.Menu.Sections[0].Items[0].Target != "catalog:B" || english.Preview[0].Items[0].Label != "Alpha" {
+				t.Fatalf("import did not follow translated runtime order: %+v", english)
+			}
 			for _, original := range []string{
 				"title: Home\nmenu: &shared\n  sections: []\nexternal: *shared\n",
 				"title: Home\ndefaults: &shared\n  menu:\n    sections: []\n<<: *shared\n",

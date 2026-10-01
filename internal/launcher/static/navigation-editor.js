@@ -209,7 +209,7 @@
       var current = ++revision;
       try {
         var query = new URLSearchParams({subsystem: data.subsystem, import: kind});
-        var result = await request(endpoint + '?' + query, {headers: {Accept: 'application/json'}});
+        var result = await request(endpoint + '?' + query, {headers: {Accept: 'application/json', 'Accept-Language': language}});
         if (current !== revision) return;
         menu = result.menu; palette = result.palette; selected = ''; changed();
       } catch (error) { if (current === revision) status(labels.error + ': ' + error.message, true); }
