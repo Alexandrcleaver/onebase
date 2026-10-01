@@ -416,6 +416,19 @@ func TestLegacyMergeWithoutSourceReviewDoesNotOwnTheLane(t *testing.T) {
 	}
 }
 
+func TestFirstReviewOfMergeHeadUsesOrdinaryMergeLane(t *testing.T) {
+	// The branch was already a merge commit when its first full content review
+	// completed. There is no earlier review to carry from the first parent.
+	pr := withMergeHead(addComment(testPR(1818, headB, "ship", "reviewed"), 40,
+		completion(headB, 35, 36)))
+	got := analyze([]apiPull{pr}, "ivanarama")
+	if got.IntegrationOwner != nil || len(got.MergeExecutable) != 1 ||
+		got.MergeExecutable[0].Number != 1818 ||
+		len(got.HumanWaiting) != 0 || hasFinding(got, "legacy_source_review_missing") {
+		t.Fatalf("first full review of merge HEAD was mistaken for legacy carry: %+v", got)
+	}
+}
+
 func TestPublicCommandDoesNotAssignUnprovedLegacyOwner(t *testing.T) {
 	broken := withMergeHead(addComment(testPR(1318, headB, "ship", "reviewed"), 30,
 		completion(headC, 20, 25)))
