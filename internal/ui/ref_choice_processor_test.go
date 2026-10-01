@@ -273,10 +273,10 @@ func TestProcessorFormChoiceFilterRefOptions(t *testing.T) {
 		t.Run("подмена контекста отвергается", func(t *testing.T) {
 			cases := map[string]func(url.Values){
 				"без form_kind — пространство сущностей": func(q url.Values) { q.Del("form_kind") },
-				"неизвестный form_kind":                   func(q url.Values) { q.Set("form_kind", "report") },
-				"чужая форма":                             func(q url.Values) { q.Set("form", "ФормаОбъекта") },
-				"неизвестный элемент":                     func(q url.Values) { q.Set("element", "direction") },
-				"неизвестная обработка":                   func(q url.Values) { q.Set("form_entity", "НетТакой") },
+				"неизвестный form_kind":                  func(q url.Values) { q.Set("form_kind", "report") },
+				"чужая форма":                            func(q url.Values) { q.Set("form", "ФормаОбъекта") },
+				"неизвестный элемент":                    func(q url.Values) { q.Set("element", "direction") },
+				"неизвестная обработка":                  func(q url.Values) { q.Set("form_entity", "НетТакой") },
 				"необъявленный источник": func(q url.Values) {
 					q.Set("sources", `{"Объект.Неисправность":"`+f.rootA.String()+`"}`)
 				},
