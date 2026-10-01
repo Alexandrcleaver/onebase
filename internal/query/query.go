@@ -2818,7 +2818,9 @@ func (tr *translator) noteRefOutputAs(entity, defaultOut string) {
 		if n := tr.peek(1); n.kind == tIdent {
 			// `КАК Ссылка` — имя зарезервировано: SQL-алиасом становится всё тот
 			// же id (ветка prevAlias ниже), а не слово «ссылка».
-			if alias := lowerFast(n.val); !isReferenceName(alias) {
+			if alias := lowerFast(n.val); isReferenceName(alias) {
+				out = "id"
+			} else {
 				out = alias
 			}
 		}
@@ -4622,7 +4624,12 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 				} else if col, ok := tr.colMap[lower]; ok && !prevDot {
 					tr.emitOwnColumn(col, lower)
 				} else if prevDot {
-					if rd := tr.findRefDim(lower); rd != nil {
+					if col, refEntity := tr.refAttrColumnForPrevQualifier(tr.pos-1, lower); col != "" {
+						// После точки реквизит принадлежит сущности квалификатора,
+						// даже если у основного источника есть одноимённое поле.
+						tr.emitQualifiedColumn(col, lower)
+						tr.noteRefOutputAs(refEntity, col)
+					} else if rd := tr.findRefDim(lower); rd != nil {
 						// Двухуровневая навигация: Источник.Ссылка.Реквизит.
 						// LEFT JOIN на связанную таблицу к этому моменту уже
 						// построен — не хватало только подстановки. Раньше путь
@@ -4642,12 +4649,6 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 						}
 					} else if c, ok2 := tr.colMap[lower]; ok2 {
 						tr.emitQualifiedColumn(c, lower)
-					} else if col, refEntity := tr.refAttrColumnForPrevQualifier(tr.pos-1, lower); col != "" {
-						tr.emitQualifiedColumn(col, lower)
-						// Выборка «Исполнитель.Учётка» отдаёт ссылку, а не
-						// строку UUID (#1784, вариант 1). Имя колонки результата
-						// без «КАК» — имя SQL-колонки, как у «Реквизит.Ссылка».
-						tr.noteRefOutputAs(refEntity, col)
 					} else {
 						tr.emitQualifiedColumn(lower, lower)
 					}
