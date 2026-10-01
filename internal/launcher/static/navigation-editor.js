@@ -84,7 +84,7 @@
     // Dropping on a container appends; dropping on a sibling inserts before it.
     function relocate(sourceID, targetID) {
       var source = find(sourceID), target = find(targetID);
-      if (!source || !target || source === target) return false;
+      if (!source || !target || sourceID === targetID) return false;
       var destination;
       if (source.kind === target.kind) destination = target.list;
       else if (source.kind === 'item' && (target.kind === 'section' || target.kind === 'group')) destination = target.node.items || (target.node.items = []);
@@ -197,7 +197,9 @@
       } catch (error) { if (current === revision) status(labels.error + ': ' + error.message, true); }
     }
     el('add-section').addEventListener('click', function () {
-      if (!menu) menu = {sections: []}; var node = {id: id('s'), title: labels.newSection}; menu.sections.push(node); selected = node.id; changed();
+      if (!menu) menu = {};
+      if (!Array.isArray(menu.sections)) menu.sections = [];
+      var node = {id: id('s'), title: labels.newSection}; menu.sections.push(node); selected = node.id; changed();
     });
     el('add-group').addEventListener('click', function () {
       var container = selectedContainer(); if (!container) return;

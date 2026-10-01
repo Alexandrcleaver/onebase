@@ -225,7 +225,7 @@ func TestNavigationEditorProductionRoutesAndOldForms(t *testing.T) {
 					t.Fatalf("old home form lost %q:\n%s", text, raw)
 				}
 			}
-			if mode == "file" {
+			{
 				node, err := exec.LookPath("node")
 				if err != nil {
 					t.Skip("node is not installed")
@@ -235,7 +235,20 @@ func TestNavigationEditorProductionRoutesAndOldForms(t *testing.T) {
 					t.Fatal(err)
 				}
 				cmd := exec.Command(node, "--test", "navigation_editor_behavior_test.js") //nolint:gosec // Test-only executable resolved with LookPath.
-				cmd.Env = append(os.Environ(), "ONEBASE_NAVIGATION_EDITOR_HTML="+path)
+				// Capture an actual page for a valid empty menu in both storage modes.
+				emptyYAML := strings.Split(navigationEditorFixture, "\nmenu:")[0] + "\nmenu: {}\n"
+				if err := h.saveConfigFile(context.Background(), b, "subsystems/school.yaml", []byte(emptyYAML)); err != nil {
+					t.Fatal(err)
+				}
+				code, emptyHTML := call(http.MethodGet, "/navigation?subsystem=School", "", "", "admin")
+				if code != http.StatusOK {
+					t.Fatalf("empty editor page: %d %s", code, emptyHTML)
+				}
+				emptyPath := filepath.Join(t.TempDir(), "empty-navigation-editor.html")
+				if err := os.WriteFile(emptyPath, []byte(emptyHTML), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cmd.Env = append(os.Environ(), "ONEBASE_NAVIGATION_EDITOR_HTML="+path, "ONEBASE_NAVIGATION_EDITOR_EMPTY_HTML="+emptyPath)
 				if output, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("production editor behavior: %v\n%s", err, output)
 				}
@@ -455,6 +468,40 @@ func TestNavigationEditorFlatImportAndAliases(t *testing.T) {
 				if string(raw) != original {
 					t.Fatal("failed alias save changed graph")
 				}
+			}
+		})
+	}
+}
+
+// A blocked staging file must fail the public save without touching the source.
+// This also catches an accidental return to direct writes of the YAML file.
+func TestNavigationEditorFailedSaveKeepsSourceYAML(t *testing.T) {
+	for _, target := range []struct{ path, subsystem string }{
+		{"subsystems/school.yaml", "School"},
+		{"config/home_page.yaml", ""},
+	} {
+		t.Run(target.path, func(t *testing.T) {
+			h, b := newNavigationEditorFixture(t, "file", "subsystems/school.yaml")
+			full := filepath.Join(b.Path, filepath.FromSlash(target.path))
+			before, err := os.ReadFile(full)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data := readNavigationEditorData(t, navigationEditorHTTP(h, http.MethodGet, "?subsystem="+target.subsystem, ""))
+			data.Menu.Sections[0].Title = "Changed title"
+			if err := os.Mkdir(full+".tmp", 0o700); err != nil {
+				t.Fatal(err)
+			}
+			res := navigationEditorHTTP(h, http.MethodPost, "/save", navigationEditorBody(t, target.subsystem, data.Menu))
+			if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), `"error"`) {
+				t.Fatalf("failed save: HTTP %d %s", res.Code, res.Body.String())
+			}
+			after, err := os.ReadFile(full)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("failed save changed source YAML")
 			}
 		})
 	}

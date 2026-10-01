@@ -357,7 +357,7 @@ func (h *handler) navigationEditorPost(w http.ResponseWriter, r *http.Request, s
 	if save {
 		out, err := updateYAMLMapping(c.raw, c.relPath, func(doc *yaml.Node) error { return setNavigationMenuYAML(doc, request.Menu) })
 		if err == nil {
-			err = h.saveConfigFile(r.Context(), b, c.relPath, out)
+			err = saveConfigFile(r, h, b, c.relPath, out)
 		}
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})

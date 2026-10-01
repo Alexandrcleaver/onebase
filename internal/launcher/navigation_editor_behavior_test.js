@@ -5,9 +5,11 @@ const test = require('node:test');
 const crypto = require('node:crypto');
 const html = fs.readFileSync(process.env.ONEBASE_NAVIGATION_EDITOR_HTML, 'utf8');
 const bootstrap = html.match(/<script>(window\.OB_MENU_EDITOR=[\s\S]*?)<\/script>/)[1];
+const emptyHTML = fs.readFileSync(process.env.ONEBASE_NAVIGATION_EDITOR_EMPTY_HTML, 'utf8');
+const emptyBootstrap = emptyHTML.match(/<script>(window\.OB_MENU_EDITOR=[\s\S]*?)<\/script>/)[1];
 const source = fs.readFileSync('static/navigation-editor.js', 'utf8');
 
-function harness() {
+function harness(pageBootstrap = bootstrap) {
   const elements = new Map(), calls = [], pending = [], events = new Map();
   const document = {readyState: 'complete', activeElement: null};
   function element(tag = 'div') {
@@ -45,7 +47,7 @@ function harness() {
     },
   };
   const context = vm.createContext({window, document, URLSearchParams, console});
-  vm.runInContext(bootstrap, context, {filename: 'production-bootstrap.js'});
+  vm.runInContext(pageBootstrap, context, {filename: 'production-bootstrap.js'});
   vm.runInContext(source, context, {filename: 'production-navigation-editor.js'});
   const get = id => elements.get('menu-' + id);
   const row = id => get('tree').children.find(node => node.dataset.id === id);
@@ -152,4 +154,49 @@ test('icon preview uses the shipped sprite and whitelist; edits during Save stay
   h.events.get('beforeunload')({preventDefault() { prevented = true; }});
   assert.equal(prevented, true);
   assert.equal(h.get('save').disabled, false);
+});
+
+test('a valid empty YAML menu can add its first section and save', async () => {
+  const h = harness(emptyBootstrap), menu = h.window.OB_MENU_EDITOR.menu;
+  assert(menu);
+  assert.equal(menu.sections, null);
+  assert.equal(h.get('tree').children.length, 0);
+  h.get('add-section').click();
+  assert.equal(menu.sections.length, 1);
+  const section = menu.sections[0];
+  assert.match(section.id, /^s-[a-z0-9-]+$/);
+  assert.equal(section.title, 'New section');
+  assert(h.row(section.id));
+  assert.equal(h.document.activeElement, h.row(section.id).querySelector('button'));
+  await settle();
+  await h.get('save').click();
+  const body = JSON.parse(h.calls.at(-1).options.body);
+  assert.equal(body.menu.sections.length, 1);
+  assert.equal(body.menu.sections[0].id, section.id);
+  assert.equal(h.get('status').textContent, 'Menu saved');
+});
+
+test('self-drop of items, folders and sections leaves order and clean state unchanged', async () => {
+  const h = harness();
+  h.row('education').querySelector('button').click();
+  h.get('add-group').click();
+  h.get('add-section').click();
+  await settle();
+  await h.get('save').click();
+  const before = JSON.stringify(h.window.OB_MENU_EDITOR.menu);
+  const ids = h.get('tree').children.map(row => row.dataset.id);
+  const calls = h.calls.length;
+  for (const id of ids) {
+    const row = h.row(id);
+    row.fire('dragstart', {dataTransfer: transferred(id)});
+    row.fire('drop', {dataTransfer: transferred(id)});
+    assert.equal(JSON.stringify(h.window.OB_MENU_EDITOR.menu), before, id);
+    assert.deepEqual(h.get('tree').children.map(row => row.dataset.id), ids, id);
+    assert.equal(h.get('status').textContent, 'Menu saved', id);
+    let prevented = false;
+    h.events.get('beforeunload')({preventDefault() { prevented = true; }});
+    assert.equal(prevented, false, id);
+  }
+  await settle();
+  assert.equal(h.calls.length, calls);
 });
