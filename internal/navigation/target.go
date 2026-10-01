@@ -59,6 +59,16 @@ func (t Target) key() string { return strings.ToLower(t.String()) }
 
 // URL returns the existing runtime route. Context is escaped as a query value.
 func (t Target) URL(context string) string {
+	return t.routeURL(context, true)
+}
+
+// LegacyURL preserves the existing navigation DTO's raw UTF-8 names/query.
+// html/template normalizes these URLs when rendering an href attribute.
+func (t Target) LegacyURL(context string) string {
+	return t.routeURL(context, false)
+}
+
+func (t Target) routeURL(context string, escaped bool) string {
 	if t.Kind == "system" {
 		return "/ui/constants"
 	}
@@ -66,12 +76,19 @@ func (t Target) URL(context string) string {
 	if t.Kind != "catalog" && t.Kind != "document" && t.Kind != "page" {
 		name = strings.ToLower(name)
 	}
-	path := "/ui/" + t.Kind + "/" + url.PathEscape(name)
+	if escaped {
+		name = url.PathEscape(name)
+	}
+	path := "/ui/" + t.Kind + "/" + name
 	if t.View == "balances" {
 		path += "/balances"
 	}
 	if context != "" {
-		path += "?" + url.Values{"subsystem": {context}}.Encode()
+		if escaped {
+			path += "?" + url.Values{"subsystem": {context}}.Encode()
+		} else {
+			path += "?subsystem=" + context
+		}
 	}
 	return path
 }

@@ -132,6 +132,9 @@ func (s *Server) buildNavigation(r *http.Request, menu *metadata.Menu, contents 
 		var output []navItem
 		for _, item := range input {
 			resolved := navigation.ResolveItem(item, lang, sub, translate, flat)
+			if !semantic {
+				resolved.URL = item.Object.Target.LegacyURL(sub)
+			}
 			if !s.navigationItemVisible(r, item.Object, resolved, semantic, flat) {
 				continue
 			}
