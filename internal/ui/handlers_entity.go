@@ -2301,27 +2301,11 @@ func (s *Server) saveMovements(ctx context.Context, docType string, docID uuid.U
 	return nil
 }
 
-// setPeriodFromFields sets the movements period from the first date field of the document.
+// setPeriodFromFields ставит период движений по дате документа — тем же
+// правилом, что entityservice: у DSL-пути и списка своей копии больше нет,
+// иначе правило «какая дата — дата документа» разъехалось бы между путями.
 func setPeriodFromFields(mc *runtime.MovementsCollector, entity *metadata.Entity, fields map[string]any) {
-	for _, f := range entity.Fields {
-		if f.Type != metadata.FieldTypeDate {
-			continue
-		}
-		// Регистронезависимый поиск: ключи Fields бывают и в PascalCase
-		// (formToFields / GetByID), и в lower-case (после Object.Set).
-		// Прямой fields[f.Name] промахивался на пути submit → period = time.Now().
-		low := strings.ToLower(f.Name)
-		for k, v := range fields {
-			if strings.ToLower(k) != low {
-				continue
-			}
-			if t := runtime.AsTime(v); !t.IsZero() {
-				mc.SetPeriod(t)
-			}
-			break
-		}
-		return
-	}
+	entityservice.SetPeriodFromFields(mc, entity, fields)
 }
 
 // saveTablePartsDirect persists tablepart rows from the provided map (possibly modified by DSL).
