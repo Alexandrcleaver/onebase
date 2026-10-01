@@ -293,6 +293,12 @@ type FormChoiceOperator string
 const (
 	FormChoiceOpEqual       FormChoiceOperator = "eq"
 	FormChoiceOpInHierarchy FormChoiceOperator = "in_hierarchy"
+	// FormChoiceOpEqualOrEmpty — «равно значению источника ИЛИ реквизит пуст».
+	// Так 1С отбирает общие записи вместе со своими: запись без филиала
+	// доступна любому филиалу, а отбор «Филиал = филиал документа» её прятал.
+	// Пустой источник оставляет только записи с пустым реквизитом — как
+	// список отбора 1С из одной пустой ссылки.
+	FormChoiceOpEqualOrEmpty FormChoiceOperator = "eq_or_empty"
 )
 
 // FormChoiceCondition описывает одно серверно проверяемое условие подбора.
