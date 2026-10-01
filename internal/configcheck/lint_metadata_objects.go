@@ -86,7 +86,7 @@ func metadataManagers(proj *project.Project) map[string]metadataManager {
 //
 // Имя менеджера, объявленное в модуле как переменная (Документы = Новый
 // Соответствие), — уже не менеджер: такое обращение не проверяется.
-func lintUnknownMetadataObjects(lp lintProgram, managers map[string]metadataManager) []Issue {
+func lintUnknownMetadataObjects(dir string, lp lintProgram, managers map[string]metadataManager) []Issue {
 	if lp.prog == nil || len(managers) == 0 {
 		return nil
 	}
@@ -103,7 +103,7 @@ func lintUnknownMetadataObjects(lp lintProgram, managers map[string]metadataMana
 	check := func(local map[string]bool) func(base, field token.Token) {
 		return func(base, field token.Token) {
 			name := strings.ToLower(base.Literal)
-			if shadowed[name] || local[name] {
+			if local[name] {
 				return
 			}
 			m, ok := managers[name]
@@ -113,13 +113,17 @@ func lintUnknownMetadataObjects(lp lintProgram, managers map[string]metadataMana
 			if _, known := m.names[strings.ToLower(field.Literal)]; known {
 				return
 			}
-			key := fmt.Sprintf("%d:%d", field.Line, field.Col)
+			key := tokenKey(field)
 			if seen[key] {
 				return
 			}
 			seen[key] = true
+			file := lp.label
+			if field.File != "" {
+				file = relLabel(dir, field.File)
+			}
 			issues = append(issues, Issue{
-				File:   sourceLabelForToken(lp.label, field),
+				File:   file,
 				Object: lp.object,
 				Kind:   lp.kind,
 				Code:   "dsl.unknown-metadata-object",
@@ -134,6 +138,13 @@ func lintUnknownMetadataObjects(lp lintProgram, managers map[string]metadataMana
 
 	for _, pr := range lp.prog.Procedures {
 		local := map[string]bool{}
+		// Загрузчик объединяет объектный модуль и модуль проведения, но
+		// переменные остаются в области видимости исходного модуля процедуры.
+		for _, decl := range pr.ModuleVars {
+			for _, tok := range decl.Names {
+				local[strings.ToLower(tok.Literal)] = true
+			}
+		}
 		for _, p := range pr.Params {
 			local[strings.ToLower(p.Literal)] = true
 		}
@@ -144,7 +155,7 @@ func lintUnknownMetadataObjects(lp lintProgram, managers map[string]metadataMana
 		}
 		walkManagerMembersStmts(pr.Body, visit)
 	}
-	walkManagerMembersStmts(lp.prog.Body, check(nil))
+	walkManagerMembersStmts(lp.prog.Body, check(shadowed))
 	return issues
 }
 

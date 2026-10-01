@@ -68,6 +68,115 @@ func TestLintUnknownMetadataObject(t *testing.T) {
 	}
 }
 
+func TestLintUnknownMetadataObjectMergedModuleScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, objectModule, postingModule string
+		wantWarnings                      int
+	}{
+		{
+			name: "posting module shadows manager",
+			objectModule: `Процедура ПриЗаписи()
+КонецПроцедуры
+`,
+			postingModule: `Перем Документы;
+Процедура Подготовить()
+  Документы = Новый Структура("Произвольный", 42);
+КонецПроцедуры
+Функция Прочитать()
+  Возврат Документы.Произвольный;
+КонецФункции
+Процедура ОбработкаПроведения()
+  Подготовить();
+  Значение = Прочитать();
+КонецПроцедуры
+`,
+		},
+		{
+			name: "object module does not shadow posting manager",
+			objectModule: `Перем Документы;
+Процедура ПриЗаписи()
+  Документы = Новый Структура("Произвольный", 42);
+КонецПроцедуры
+`,
+			postingModule: `Процедура ОбработкаПроведения()
+  Значение = Документы.НетТакого;
+КонецПроцедуры
+`,
+			wantWarnings: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeMetadataObjectsProject(t, dir)
+			mkFile(t, filepath.Join(dir, "src", "приход.os"), tc.objectModule)
+			mkFile(t, filepath.Join(dir, "src", "приход.posting.os"), tc.postingModule)
+			res := RunFullWithOptions(dir, Options{Lint: true})
+			if !res.OK {
+				t.Fatalf("проверка конфигурации: %+v", res.Issues)
+			}
+			var got []Issue
+			for _, w := range res.Warnings {
+				if w.Code == "dsl.unknown-metadata-object" && w.Object == "Приход" {
+					got = append(got, w)
+				}
+			}
+			if len(got) != tc.wantWarnings {
+				t.Fatalf("ожидалось %d предупреждений для Приход, получено: %+v", tc.wantWarnings, got)
+			}
+		})
+	}
+}
+
+func TestLintUnknownMetadataObjectMergedSourceLocations(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix string
+		postingLine  int
+	}{
+		{"same coordinates", "", 2},
+		{"posting line beyond object file", strings.Repeat("\n", 8), 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeMetadataObjectsProject(t, dir)
+			mkFile(t, filepath.Join(dir, "src", "приход.os"), `Процедура ПриЗаписи()
+  Значение = Документы.НетПервого;
+КонецПроцедуры
+`)
+			mkFile(t, filepath.Join(dir, "src", "приход.posting.os"), tc.prefix+`Процедура ОбработкаПроведения()
+  Значение = Документы.НетВторого;
+КонецПроцедуры
+`)
+			res := RunFullWithOptions(dir, Options{Lint: true})
+			if !res.OK {
+				t.Fatalf("проверка конфигурации: %+v", res.Issues)
+			}
+			got := map[string]Issue{}
+			count := 0
+			for _, w := range res.Warnings {
+				if w.Code == "dsl.unknown-metadata-object" && w.Object == "Приход" {
+					got[w.File] = w
+					count++
+				}
+			}
+			if count != 2 || len(got) != 2 {
+				t.Fatalf("ожидались два предупреждения в разных файлах, получено %d: %+v", count, got)
+			}
+			for _, want := range []struct {
+				file, member string
+				line         int
+			}{
+				{"src/приход.os", "Документы.НетПервого:", 2},
+				{"src/приход.posting.os", "Документы.НетВторого:", tc.postingLine},
+			} {
+				w, ok := got[want.file]
+				if !ok || w.Line != want.line || w.Column != 24 || !strings.HasPrefix(w.Message, want.member) {
+					t.Errorf("неверный локатор %s:%d:24: %+v", want.file, want.line, w)
+				}
+			}
+		})
+	}
+}
+
 func writeMetadataObjectsProject(t *testing.T, dir string) {
 	t.Helper()
 	mkFile(t, filepath.Join(dir, "catalogs", "товар.yaml"), `name: Товар

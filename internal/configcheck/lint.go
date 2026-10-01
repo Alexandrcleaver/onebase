@@ -729,7 +729,7 @@ func CheckLintDSL(dir string, proj *project.Project) []Issue {
 		issues = append(issues, lintUnusedVars(lp)...)
 		issues = append(issues, lintCrossScopeReads(lp)...)
 		issues = append(issues, lintUnknownGlobalMembers(lp, globals)...)
-		issues = append(issues, lintUnknownMetadataObjects(lp, managers)...)
+		issues = append(issues, lintUnknownMetadataObjects(dir, lp, managers)...)
 	}
 	issues = append(issues, lintDeadProcedures(programs)...)
 	return issues
