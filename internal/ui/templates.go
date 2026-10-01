@@ -430,22 +430,27 @@ func templateFuncs(bundle *i18n.Bundle) template.FuncMap {
 		// filters; falling back by field name is only for elements without the
 		// opt-in contract.
 		"managedRefOptions": func(ctx map[string]any, element *metadata.FormElement, field string) []map[string]any {
-			if element != nil {
-				if scoped, ok := ctx["ManagedChoiceOptions"].(map[string][]map[string]any); ok {
-					if rows, exists := scoped[element.ID]; exists {
-						return rows
-					}
-				}
+			rows := managedRefOptionRows(ctx, element, field)
+			// choice_dropdown: false — список не разворачивается, выбор идёт формой
+			// подбора. Текущее значение в списке остаётся: без его <option>
+			// заполненное поле выглядело бы пустым.
+			if element != nil && element.ChoiceDropdown != nil && !*element.ChoiceDropdown {
+				return selectedRefOptionsOnly(rows, formContextValue(ctx, field))
 			}
-			if refs, ok := ctx["RefOptions"].(map[string][]map[string]any); ok {
-				return refs[field]
+			return rows
+		},
+		"choiceDropdownCollapsed": func(element *metadata.FormElement) bool {
+			return element != nil && element.ChoiceDropdown != nil && !*element.ChoiceDropdown
+		},
+		// adminOnlyLocked — поле заперто, потому что смотрит не администратор.
+		// Тот же запрет входит в ответы событий формы и в разбор записи: иначе
+		// ложное readonly_when разблокировало бы поле после первого round trip.
+		"adminOnlyLocked": func(ctx map[string]any, element *metadata.FormElement) bool {
+			if element == nil || !element.EditableAdminOnly {
+				return false
 			}
-			if refs, ok := ctx["RefOptions"].(map[string]any); ok {
-				if rows, ok := refs[field].([]map[string]any); ok {
-					return rows
-				}
-			}
-			return nil
+			admin, _ := ctx["IsAdmin"].(bool)
+			return !admin
 		},
 		"managedChoiceContext": func(ctx map[string]any, element *metadata.FormElement) string {
 			if element == nil {
@@ -1230,6 +1235,53 @@ func isListStateQueryKey(key string) bool {
 // setQueryValue ставит значение параметра; пустое значение убирает параметр, а
 // ключ с «*» на конце — все параметры с таким префиксом (например "f.*" — весь
 // отбор списка).
+// managedRefOptionRows возвращает варианты ссылочного поля: отобранные
+// choice_filter, если сервер посчитал их для этого элемента, иначе общую
+// предзагруженную страницу справочника.
+func managedRefOptionRows(ctx map[string]any, element *metadata.FormElement, field string) []map[string]any {
+	if element != nil {
+		if scoped, ok := ctx["ManagedChoiceOptions"].(map[string][]map[string]any); ok {
+			if rows, exists := scoped[element.ID]; exists {
+				return rows
+			}
+		}
+	}
+	if refs, ok := ctx["RefOptions"].(map[string][]map[string]any); ok {
+		return refs[field]
+	}
+	if refs, ok := ctx["RefOptions"].(map[string]any); ok {
+		if rows, ok := refs[field].([]map[string]any); ok {
+			return rows
+		}
+	}
+	return nil
+}
+
+// selectedRefOptionsOnly оставляет в списке только текущее значение поля.
+func selectedRefOptionsOnly(rows []map[string]any, selected string) []map[string]any {
+	if strings.TrimSpace(selected) == "" {
+		return nil
+	}
+	for _, row := range rows {
+		if refValueString(row["id"]) == selected {
+			return []map[string]any{row}
+		}
+	}
+	return nil
+}
+
+// formContextValue читает значение поля из Values контекста формы: карта
+// приезжает и строковой, и разнотипной — в зависимости от пути отрисовки.
+func formContextValue(ctx map[string]any, field string) string {
+	switch values := ctx["Values"].(type) {
+	case map[string]string:
+		return strings.TrimSpace(values[field])
+	case map[string]any:
+		return strings.TrimSpace(refValueString(values[field]))
+	}
+	return ""
+}
+
 func setQueryValue(vals url.Values, key, value string) {
 	if prefix, ok := strings.CutSuffix(key, "*"); ok {
 		for k := range vals {
@@ -2346,7 +2398,7 @@ const tplForm = `
       {{end}}
     </select>
   {{else if eq (str .Type) "date"}}
-    <input type="datetime-local" name="{{$fn}}" value="{{index $.Values $fn}}"{{if $ro}} readonly{{end}}>
+    <input type="datetime-local" step="1" name="{{$fn}}" value="{{index $.Values $fn}}"{{if $ro}} readonly{{end}}>
   {{else if eq (str .Type) "bool"}}
     {{if $ro}}<input type="hidden" name="{{$fn}}" value="{{index $.Values $fn}}">{{end}}
     <select{{if not $ro}} name="{{$fn}}"{{end}}{{if $ro}} disabled{{end}}>
