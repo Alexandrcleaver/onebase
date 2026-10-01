@@ -115,6 +115,9 @@ type handler struct {
 	statusTimeout time.Duration
 	// statusReadAppYAML синхронизирует тест таймаута; в production всегда nil.
 	statusReadAppYAML func(context.Context, *Base, any) error
+	// clientProbeClient — HTTP-клиент для проверки доступности сервера
+	// клиентского подключения. Подменяется тестом; в production всегда nil.
+	clientProbeClient *http.Client
 	// updateMu serializes every selfupdate state mutation, including the quiet
 	// watcher, so a stale network result cannot erase restart recovery state.
 	updateMu sync.Mutex
@@ -214,6 +217,15 @@ func (h *handler) probeBase(b *Base) baseStatus {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
+	// Клиентское подключение: «работает» означает «сервер отвечает». Читать
+	// app.yaml не идём — ни DSN, ни каталога конфигурации у записи нет, а имя и
+	// логотип базы лаунчер здесь берёт именно оттуда. Показать их для серверной
+	// записи можно будет, когда у сервера появится публичный ответ с этими
+	// полями; выдумывать их из адреса нечестно.
+	if b.Client() {
+		return baseStatus{running: clientServerReachable(ctx, b, h.clientProbeClient), fetched: time.Now()}
+	}
 
 	st := baseStatus{running: h.baseRunning(b), fetched: time.Now()}
 	var cfg struct {
@@ -343,6 +355,26 @@ func (h *handler) create(w http.ResponseWriter, r *http.Request) {
 			"Title": tr(lang, "onebase — Добавить базу"),
 			"IsNew": true, "Base": b, "Error": tr(lang, "Наименование обязательно"),
 		})
+		return
+	}
+	// Подключение к работающему серверу: у записи нет ни БД, ни конфигурации, ни
+	// порта — создавать и проверять нечего. Короткий путь обязателен: общая ветка
+	// ниже создала бы базу данных и конфигурацию на стороне клиента.
+	if r.FormValue("base_kind") == baseKindClient {
+		client, err := NewClientBase(b.Name, r.FormValue("server_url"))
+		if err != nil {
+			b.ServerURL = strings.TrimSpace(r.FormValue("server_url"))
+			render(w, r, "page-form", map[string]any{
+				"Title": tr(lang, "onebase — Добавить базу"),
+				"IsNew": true, "Base": b, "Error": err.Error(),
+			})
+			return
+		}
+		if err := h.store.Add(client); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		http.Redirect(w, r, "/?sel="+client.ID, http.StatusFound)
 		return
 	}
 	if b.DBType == "sqlite" {
@@ -489,6 +521,32 @@ func (h *handler) update(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Вид записи можно переключить в обе стороны. Поля противоположного вида
+	// затираем, а не оставляем «на всякий случай»: запись с одновременными
+	// server_url и DSN неоднозначна, и завтра кто-то прочтёт из неё не то поле.
+	if r.FormValue("base_kind") == baseKindClient {
+		normalized, err := normalizeServerURL(r.FormValue("server_url"))
+		if err != nil {
+			b.ServerURL = strings.TrimSpace(r.FormValue("server_url"))
+			render(w, r, "page-form", map[string]any{
+				"Title": tr(lang, "onebase — Изменить базу"),
+				"IsNew": false, "Base": b, "Error": err.Error(),
+			})
+			return
+		}
+		client := &Base{
+			ID: b.ID, Name: b.Name, ServerURL: normalized,
+			Created: b.Created, LastOpened: b.LastOpened,
+		}
+		if err := h.store.Update(client); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		h.invalidateStatus(client.ID)
+		http.Redirect(w, r, "/?sel="+client.ID, http.StatusFound)
+		return
+	}
+	b.ServerURL = ""
 	if b.DBType == "sqlite" {
 		b.DBPath = normalizeSQLitePath(b.DBPath, b.Name)
 	}
@@ -621,6 +679,19 @@ func (h *handler) baseRunning(b *Base) bool {
 // её сервера. Общий пролог обработчиков start / startIsolated / startNative:
 // при ошибке пишет JSON-ответ и возвращает false.
 func (h *handler) ensureBaseReady(w http.ResponseWriter, r *http.Request, b *Base, lang string) bool {
+	// Клиентское подключение: поднимать нечего, control-token не нужен (он
+	// подтверждает ВЛАДЕНИЕ процессом, которого здесь нет). Недоступность сервера
+	// тоже не причина отказать: окно откроется и покажет ошибку браузера,
+	// понятную пользователю, — это честнее, чем нам угадывать причину за него.
+	// Отметку последнего открытия ставим, как и для обычной базы: список
+	// сортируется по ней.
+	if b.Client() {
+		if err := h.store.TouchLastOpened(b.ID, time.Now()); err != nil {
+			respondLog().Warn("не удалось сохранить отметку последнего открытия базы",
+				"baseID", b.ID, "err", err)
+		}
+		return true
+	}
 	// Mint the persistent identity before the first liveness/adoption probe.
 	// Public /health on a tokenless legacy record is forgeable by any process
 	// that won the saved port; treating that response as this base would hand
