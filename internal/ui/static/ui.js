@@ -4099,6 +4099,12 @@ function obRefreshDependentSelects(sourceEl) {
           if (!data || sel._obOwnerRefreshSeq !== seq || obRefFilterParam(sel) !== filter) return;
           var rows = data.items || [];
           var current = sel.value;
+          // choice_dropdown: false — список закрыт, и смена владельца его не
+          // раскрывает. Проверка допустимости значения та же, что у открытого
+          // списка (присутствие в странице ответа нового владельца); отличается
+          // только разметка: в закрытом списке остаётся одно подтверждённое
+          // значение, а выбирают в таком поле кнопкой подбора.
+          var collapsed = sel.getAttribute('data-ref-choice-dropdown') === 'false';
           var keep = false;
           while (sel.options.length) sel.remove(0);
           var empty = document.createElement('option');
@@ -4106,10 +4112,14 @@ function obRefreshDependentSelects(sourceEl) {
           empty.textContent = '— выбрать —';
           sel.appendChild(empty);
           for (var j = 0; j < rows.length; j++) {
+            var id = String(rows[j].id);
+            // keep считается ДО отсева: закрытый список не показывает строку,
+            // но знать, что владелец её подтвердил, обязан.
+            if (id === String(current)) keep = true;
+            if (collapsed && id !== String(current)) continue;
             var opt = document.createElement('option');
             opt.value = rows[j].id;
             opt.textContent = rows[j]._label != null ? rows[j]._label : rows[j].id;
-            if (String(opt.value) === String(current)) keep = true;
             sel.appendChild(opt);
           }
           sel.value = keep ? current : '';
@@ -4276,9 +4286,11 @@ function obChoiceApplyResponse(sel, data, selectedAtRequest) {
   sel.appendChild(blank);
 
   var selectedPresent = false;
+  var collapsed = sel.getAttribute('data-ref-choice-dropdown') === 'false';
   rows.forEach(function (row) {
     var id = row && row.id != null ? String(row.id) : '';
     if (!id) return;
+    if (collapsed && (id !== selectedAtRequest || selectedAllowed === false)) return;
     var opt = document.createElement('option');
     opt.value = id;
     opt.textContent = String((row && row._label) || id);
