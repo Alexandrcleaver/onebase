@@ -279,6 +279,57 @@ func TestRunFullChoiceFilterAcceptsPlanExamples(t *testing.T) {
 	}
 }
 
+// eq_or_empty принимает тот же глубокий источник, что eq: в одной форме оба
+// оператора с `Объект.Направление.ГруппаНеисправностей` проходят onebase check,
+// а неверный глубокий путь отвергается с тем же разбором, что у eq. Раньше
+// ветка eq_or_empty знала только двухсегментный путь и отклоняла такой from.
+func TestRunFullChoiceFilterEqualOrEmptyAcceptsDeepSourceLikeEqual(t *testing.T) {
+	dir := t.TempDir()
+	writeChoiceFilterCheckProject(t, dir, true, `  - id: fault
+    kind: ПолеВвода
+    data_path: Объект.Неисправность
+    choice_filter:
+      - field: Группа
+        op: eq
+        from: Объект.Направление.ГруппаНеисправностей
+  - id: faultOrCommon
+    kind: ПолеВвода
+    data_path: Объект.Неисправность
+    choice_filter:
+      - field: Группа
+        op: eq_or_empty
+        from: Объект.Направление.ГруппаНеисправностей`)
+	if result := RunFullWithOptions(dir, Options{Lint: true}); !result.OK || len(choiceFilterIssues(result)) != 0 {
+		t.Fatalf("глубокий источник eq/eq_or_empty не прошёл onebase check: issues=%+v warnings=%+v", result.Issues, result.Warnings)
+	} else {
+		assertNoChoiceFilterLintWarning(t, result)
+	}
+
+	for _, tc := range []struct {
+		name, from, field, want string
+	}{
+		{"deeper than one hop", "Объект.Направление.ГруппаНеисправностей.Наименование", "Группа", "не более одного перехода"},
+		{"intermediate attribute is not a reference", "Объект.Направление.Наименование", "Группа", "не ссылочный"},
+		{"unknown intermediate attribute", "Объект.Направление.НетТакого", "Группа", "нет реквизита"},
+		{"incompatible deep reference", "Объект.Направление.ГруппаНеисправностей", "Направление", "несовместимые ссылки"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeChoiceFilterCheckProject(t, dir, true, fmt.Sprintf(`  - id: faultOrCommon
+    kind: ПолеВвода
+    data_path: Объект.Неисправность
+    choice_filter: [{field: %s, op: eq_or_empty, from: %s}]`, tc.field, tc.from))
+			result := RunFull(dir)
+			for _, issue := range choiceFilterIssues(result) {
+				if strings.Contains(issue.Message, tc.want) && strings.Contains(issue.Message, tc.from) {
+					return
+				}
+			}
+			t.Fatalf("onebase check issues %+v do not contain eq_or_empty diagnostic %q for %q", result.Issues, tc.want, tc.from)
+		})
+	}
+}
+
 func TestRunFullChoiceFilterRejectsPublicContractViolations(t *testing.T) {
 	tests := []struct {
 		name         string

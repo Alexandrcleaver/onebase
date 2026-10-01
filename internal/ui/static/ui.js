@@ -504,6 +504,11 @@ function obReadJSONScript(id, fallback) {
       document.querySelectorAll('aside details.navsec').forEach(function (d) {
         var key = 'navsec:' + d.getAttribute('data-navsec');
         var saved = localStorage.getItem(key);
+        var legacy = d.getAttribute('data-navsec-legacy');
+        if (saved === null && legacy) {
+          saved = localStorage.getItem('navsec:' + legacy);
+          if (saved === '1' || saved === '0') localStorage.setItem(key, saved);
+        }
         if (saved === '1') d.open = true;
         else if (saved === '0') d.open = false;
         d.addEventListener('toggle', function () { localStorage.setItem(key, d.open ? '1' : '0'); });
