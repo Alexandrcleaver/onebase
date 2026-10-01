@@ -447,14 +447,14 @@ func allSchemas() map[string]map[string]any {
 		"role":      looseNamedSchema("OneBase RBAC role"),
 		"page":      looseNamedSchema("OneBase page"),
 		"service":   looseNamedSchema("OneBase HTTP service"),
-		"subsystem": looseNamedSchema("OneBase subsystem"),
+		"subsystem": navigationContainerSchema(false),
 		"journal":   looseNamedSchema("OneBase document journal"),
 		"scheduled": looseNamedSchema("OneBase scheduled job"),
 		"accounts":  looseNamedSchema("OneBase chart of accounts"),
 		"accountreg": fieldGroupSchema("OneBase accounting register", accountRegField, []string{"resources", "subconto"}, map[string]any{
 			"accounts": stringSchema("Имя плана счетов"),
 		}),
-		"home-page": looseNamedSchema("OneBase home page"),
+		"home-page": navigationContainerSchema(true),
 	}
 }
 
