@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"context"
+	"errors"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -78,6 +79,13 @@ func cfgDBReadLeaseHeld(ctx context.Context, baseID string) bool {
 // ни файлов конфигурации она не касается.
 //
 // Конфигурация такой базы живёт на её сервере, там же и правится.
+//
+// ВАЖНО: вызывать ПОД той блокировкой, под которой дальше открывается база.
+// Запись читается здесь заново, поэтому проверка до lease закрывала только
+// часть окна: между ней и взятием lease запись успевала стать клиентской, и
+// ожидавший запрос всё равно открывал локальную базу. Отказ до getAuthDB —
+// обязательное условие: именно getAuthDB создаёт onebase_<id>.db по пустым
+// полям записи.
 func (h *handler) rejectClientBaseConfig(w http.ResponseWriter, r *http.Request) bool {
 	if h.store == nil {
 		return false
@@ -90,21 +98,32 @@ func (h *handler) rejectClientBaseConfig(w http.ResponseWriter, r *http.Request)
 	if err != nil || !base.Client() {
 		return false
 	}
-	http.Error(w, "база «"+base.Name+"» — подключение к работающему серверу "+base.ServerURL+
-		": конфигуратор лаунчера к ней не применяется, конфигурация правится на самом сервере",
-		http.StatusConflict)
+	http.Error(w, clientBaseConfigRefusal(base), http.StatusConflict)
 	return true
+}
+
+// ErrBaseNotOwnedConfig — операция конфигуратора над записью клиентского
+// подключения, пришедшая мимо middleware (прямые входы отладчика и
+// одноразового кода).
+var ErrBaseNotOwnedConfig = errors.New("launcher: configurator is not available for a client connection")
+
+// clientBaseConfigRefusal — единый текст отказа: причина и куда идти.
+func clientBaseConfigRefusal(base *Base) string {
+	return "база «" + base.Name + "» — подключение к работающему серверу " + base.ServerURL +
+		": конфигуратор лаунчера к ней не применяется, конфигурация правится на самом сервере"
 }
 
 func (h *handler) cfgDBReadMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.rejectClientBaseConfig(w, r) {
-			return
-		}
 		id := chi.URLParam(r, "id")
 		gate := cfgAuthDBGate(id)
 		gate.RLock()
 		defer gate.RUnlock()
+		// Под lease, а не до неё: иначе запись успевала стать клиентской между
+		// проверкой и блокировкой, и ожидавший запрос открывал локальную базу.
+		if h.rejectClientBaseConfig(w, r) {
+			return
+		}
 		ctx := context.WithValue(r.Context(), cfgDBReadLeaseKey{}, id)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -403,9 +422,6 @@ func (h *handler) cfgLogout(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) cfgAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.rejectClientBaseConfig(w, r) {
-			return
-		}
 		id := chi.URLParam(r, "id")
 		// Restore routes intentionally do not have the outer read middleware:
 		// authenticate under a short read lease, release it, then let the handler
@@ -422,6 +438,11 @@ func (h *handler) cfgAuthMiddleware(next http.Handler) http.Handler {
 				}
 			}
 			defer releaseRead()
+		}
+		// После lease: ниже идёт открытие базы, и вид записи должен быть
+		// актуальным именно на этот момент.
+		if h.rejectClientBaseConfig(w, r) {
+			return
 		}
 		b, err := h.store.Get(id)
 		if err != nil {
@@ -517,6 +538,13 @@ func (h *handler) cfgAuthExclusiveRecheckMiddleware(next http.Handler) http.Hand
 			http.NotFound(w, r)
 			return
 		}
+		// Под exclusive lease вид проверяется заново: переход short-read →
+		// exclusive — ещё одно окно, в которое запись могла стать клиентской, а
+		// recheckCfgAdminExclusive ниже снова открывает базу.
+		if b.Client() {
+			http.Error(w, clientBaseConfigRefusal(b), http.StatusConflict)
+			return
+		}
 
 		user, openAccess, err := recheckCfgAdminExclusive(r.Context(), b, credential)
 		if err != nil {
@@ -579,6 +607,16 @@ func (h *handler) cfgAdminAuthorized(r *http.Request, b *Base) (bool, error) {
 		gate := cfgAuthDBGate(b.ID)
 		gate.RLock()
 		defer gate.RUnlock()
+	}
+	// Прямые входы отладчика и одноразового кода зарегистрированы ВНЕ
+	// cfgDBRead/cfgAuth middleware и приходят сюда, минуя общий отказ. Без этой
+	// проверки getAuthDB ниже создавал клиентской записи локальный
+	// onebase_<id>.db по её пустым полям — что и воспроизводилось на
+	// /debug/status и /one-time-code.
+	//
+	// Запись перечитываем: переданная могла быть прочитана до блокировки.
+	if current, err := h.store.Get(b.ID); err == nil && current.Client() {
+		return false, ErrBaseNotOwnedConfig
 	}
 	db, err := getAuthDB(r.Context(), b)
 	if err != nil {
