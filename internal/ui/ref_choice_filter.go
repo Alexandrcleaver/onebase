@@ -162,12 +162,14 @@ func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, f
 	predicates := make([]storage.ChoicePredicate, 0, len(element.ChoiceFilter))
 	targetDecisions := s.fieldDecisions(ctx, target)
 	for _, condition := range element.ChoiceFilter {
+		// Match the checker and SQL field lookup before applying target masks.
+		fieldName := strings.TrimSpace(condition.Field)
 		// The filtered result and its total reveal a target field even when the
 		// field itself is hidden from the response. Keep mask and hide identical.
-		if choiceAttrMasked(targetDecisions, condition.Field) {
+		if choiceAttrMasked(targetDecisions, fieldName) {
 			return nil, true, nil
 		}
-		predicate := storage.ChoicePredicate{Field: condition.Field, Op: condition.Op}
+		predicate := storage.ChoicePredicate{Field: fieldName, Op: condition.Op}
 		if condition.Value != nil {
 			predicate.Value = *condition.Value
 			predicates = append(predicates, predicate)
@@ -198,7 +200,7 @@ func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, f
 			predicates = append(predicates, predicate)
 			continue
 		}
-		value, found, err := s.deepChoiceSourceValue(ctx, owner, form, source, id, choiceTargetFieldIsString(target, condition.Field))
+		value, found, err := s.deepChoiceSourceValue(ctx, owner, form, source, id, choiceTargetFieldIsString(target, fieldName))
 		if err != nil {
 			return nil, false, err
 		}

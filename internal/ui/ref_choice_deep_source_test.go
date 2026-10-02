@@ -500,3 +500,53 @@ func TestRefOptionsBooleanLiteralRespectsTargetFieldPolicy(t *testing.T) {
 		hiddenResponse = response.Body.String()
 	}
 }
+
+func TestRefOptionsDeepChoiceStringTargetFieldPolicyNormalizesName(t *testing.T) {
+	for _, field := range []string{"Аудитория", " Аудитория ", "\tаУдИтОрИя\u00a0"} {
+		t.Run(field, func(t *testing.T) {
+			f := newDeepChoiceFixture(t)
+			f.owner.Forms[0].Elements[1].ChoiceFilter = []metadata.FormChoiceCondition{{
+				Field: field, Op: metadata.FormChoiceOpEqual, From: "Объект.Направление.Аудитория",
+			}}
+			sources := map[string]string{"Объект.Направление.Аудитория": f.directionA.String()}
+			extra := url.Values{"selected_id": {deepChoiceUUID(0x30, 1).String()}}
+			open := deepChoiceUser(nil)
+			response := f.requestWith(t, open, sources, extra)
+			if response.Code != http.StatusOK {
+				t.Fatalf("unmasked status=%d body=%s", response.Code, response.Body.String())
+			}
+			got := decodeChoiceHTTP(t, response)
+			if got.Total != 2 || len(got.Items) != 2 || got.SelectedAllowed == nil || !*got.SelectedAllowed {
+				t.Fatalf("unmasked string filter should find two rows and allow the selection: %#v", got)
+			}
+			if options := f.initialOptions(t, open); len(options) != 2 {
+				t.Fatalf("unmasked initial options=%v, want two", options)
+			}
+
+			var hiddenResponse string
+			for _, strategy := range []string{"hide", "mask_all"} {
+				t.Run(strategy, func(t *testing.T) {
+					user := deepChoiceUser(nil)
+					user.Roles[0].Permissions.FieldAccess.Catalogs = map[string]auth.FieldPolicies{
+						f.target.Name: {"Аудитория": {Read: strategy}},
+					}
+					response := f.requestWith(t, user, sources, extra)
+					if response.Code != http.StatusOK {
+						t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+					}
+					got := decodeChoiceHTTP(t, response)
+					if got.Total != 0 || len(got.Items) != 0 || got.SelectedAllowed == nil || *got.SelectedAllowed {
+						t.Fatalf("masked target leaked its string via choice results: %#v", got)
+					}
+					if hiddenResponse != "" && response.Body.String() != hiddenResponse {
+						t.Fatalf("hide and mask_all responses differ: %q vs %q", hiddenResponse, response.Body.String())
+					}
+					hiddenResponse = response.Body.String()
+					if options := f.initialOptions(t, user); len(options) != 0 {
+						t.Fatalf("masked target leaked its string via initial options: %v", options)
+					}
+				})
+			}
+		})
+	}
+}
