@@ -3,6 +3,8 @@ package ui
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
+	"maps"
 	"net/http"
 	"sort"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/ivantit66/onebase/internal/metadata"
 	"github.com/ivantit66/onebase/internal/navigation"
 	"github.com/ivantit66/onebase/internal/runtime"
+	"github.com/ivantit66/onebase/internal/storage"
 )
 
 type navItem struct {
@@ -114,7 +117,7 @@ func NavigationObjects(reg *runtime.Registry) []navigation.Object {
 	return objects
 }
 
-func (s *Server) buildNavigation(r *http.Request, menu *metadata.Menu, contents *metadata.SubsystemContents, global bool, sub string) []navGroup {
+func (s *Server) configurationNavigation(menu *metadata.Menu, contents *metadata.SubsystemContents, global bool, sub string) (navigation.Tree, bool) {
 	context := navContext(sub)
 	scope := navigation.NewScope(NavigationObjects(s.reg), contents, global)
 	tree, diagnostics := navigation.Normalize(context, menu, scope)
@@ -127,8 +130,48 @@ func (s *Server) buildNavigation(r *http.Request, menu *metadata.Menu, contents 
 			break
 		}
 	}
-	semantic := menu != nil
-	flat := global && contents.IsEmpty()
+	return tree, menu != nil
+}
+
+// The configurator preview has no store; it remains a configuration-only view.
+// Database failures and corrupt stored layers retain the safe previous layout.
+func (s *Server) adminNavigationLayer(r *http.Request, base navigation.Tree) (navigation.Tree, []navigation.Diagnostic) {
+	if s.store == nil {
+		return base, nil
+	}
+	setting, err := s.store.GetNavigationSettings(r.Context(), storage.NavigationSettingsScope{Layer: navigation.AdminLayer, Context: base.Context})
+	if err != nil {
+		slog.Warn("navigation settings unavailable", "context", base.Context)
+		return base, []navigation.Diagnostic{{Code: "unavailable-layer", Node: "admin", Warning: true}}
+	}
+	var raw []byte
+	if setting.Exists {
+		raw = []byte(setting.Raw)
+	}
+	tree, diagnostics := navigation.Compose(base, raw, nil)
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == "invalid-layer" {
+			slog.Warn("invalid navigation settings skipped", "context", base.Context, "layer", "admin")
+		}
+	}
+	return tree, diagnostics
+}
+
+func (s *Server) buildNavigation(r *http.Request, menu *metadata.Menu, contents *metadata.SubsystemContents, global bool, sub string) []navGroup {
+	base, configured := s.configurationNavigation(menu, contents, global, sub)
+	tree, _ := s.adminNavigationLayer(r, base)
+	return s.navigationGroups(r, tree, base, configured, global && contents.IsEmpty(), sub)
+}
+
+func (s *Server) navigationGroups(r *http.Request, tree, base navigation.Tree, configured, flat bool, sub string) []navGroup {
+	context := base.Context
+	baseHash, _ := base.Hash()
+	treeHash, _ := tree.Hash()
+	semantic := configured || baseHash != treeHash
+	originals := make(map[string]navigation.Section, len(base.Sections))
+	for _, section := range base.Sections {
+		originals[section.ID] = section
+	}
 	lang := s.resolveLang(r)
 	translate := func(key string) string { return s.tr(lang, key) }
 	items := func(input []navigation.Item) []navItem {
@@ -152,13 +195,16 @@ func (s *Server) buildNavigation(r *http.Request, menu *metadata.Menu, contents 
 	for _, section := range tree.Sections {
 		group := navGroup{ID: section.ID, DOMID: navDOMID(context, section.ID), Icon: section.Icon,
 			Kind: navigation.DisplayTitle(section.Title, section.Titles, lang), Items: items(section.Items), Open: semantic}
-		if !semantic {
+		original, existed := originals[section.ID]
+		if !configured && existed && section.Title == original.Title && maps.Equal(section.Titles, original.Titles) {
 			group.Kind = translate(section.Title)
 			if section.ID == "cfg:legacy-system" {
 				group.Kind = section.Title // exact legacy heading, including other UI languages
 			}
 			group.LegacyTitle = group.Kind
-			group.Open = section.ID == "cfg:legacy-catalog" || section.ID == "cfg:legacy-document" || section.ID == "cfg:legacy-page"
+			if !semantic {
+				group.Open = section.ID == "cfg:legacy-catalog" || section.ID == "cfg:legacy-document" || section.ID == "cfg:legacy-page"
+			}
 		}
 		for _, folder := range section.Groups {
 			visible := items(folder.Items)
@@ -205,6 +251,10 @@ func AdminNavigationPreview(reg *runtime.Registry, menu *metadata.Menu, contents
 	r, _ := http.NewRequest(http.MethodGet, "/", nil)
 	r = r.WithContext(auth.ContextWithUser(r.Context(), &auth.User{IsAdmin: true, Lang: lang}))
 	s := &Server{reg: reg, cfg: Config{Bundle: bundle, Lang: lang}}
+	return navigationPreview(s.buildNavigation(r, menu, contents, global, sub))
+}
+
+func navigationPreview(groups []navGroup) []NavigationPreviewSection {
 	items := func(input []navItem) []NavigationPreviewItem {
 		out := make([]NavigationPreviewItem, 0, len(input))
 		for _, item := range input {
@@ -213,7 +263,7 @@ func AdminNavigationPreview(reg *runtime.Registry, menu *metadata.Menu, contents
 		return out
 	}
 	out := []NavigationPreviewSection{}
-	for _, section := range s.buildNavigation(r, menu, contents, global, sub) {
+	for _, section := range groups {
 		next := NavigationPreviewSection{ID: section.ID, Title: section.Kind, Icon: section.Icon, Items: items(section.Items), Groups: []NavigationPreviewGroup{}}
 		for _, group := range section.Groups {
 			next.Groups = append(next.Groups, NavigationPreviewGroup{ID: group.ID, Title: group.Kind, Icon: group.Icon, Items: items(group.Items)})

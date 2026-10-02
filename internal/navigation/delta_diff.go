@@ -38,7 +38,7 @@ func Diff(base, desired Tree, layer Layer) (Delta, error) {
 		if node.kind != old.kind || node.kind == itemNode && node.item.Target != old.item.Target {
 			return Delta{}, fmt.Errorf("navigation: target or node kind changed")
 		}
-		if node.title == old.title && !maps.Equal(node.titles, old.titles) {
+		if node.title == old.title && !maps.Equal(node.titles, old.titles) && len(node.titles) != 0 {
 			return Delta{}, fmt.Errorf("navigation: localized titles are inherited")
 		}
 	}
@@ -111,7 +111,7 @@ func Diff(base, desired Tree, layer Layer) (Delta, error) {
 	sort.Strings(ids)
 	for _, id := range ids {
 		w, old := wanted.nodes[id], work.nodes[id]
-		if w.title != old.title {
+		if w.title != old.title || !maps.Equal(w.titles, old.titles) {
 			title := w.title
 			delta.Ops = append(delta.Ops, Operation{Op: "rename", Node: id, Title: &title})
 		}
