@@ -60,6 +60,9 @@ func ApplyDelta(base Tree, delta Delta, layer Layer) (Tree, []Diagnostic, error)
 				return Tree{}, nil, fmt.Errorf("navigation: container title is empty")
 			}
 			n.title, n.titles = *op.Title, nil
+			if n.kind == sectionNode {
+				n.titleExplicit = true
+			}
 		case "set_icon":
 			n.icon = *op.Icon
 		case "move":

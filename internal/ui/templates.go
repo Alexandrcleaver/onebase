@@ -1309,7 +1309,7 @@ func normalizedFormHotkey(value string) string {
 }
 
 func templateSource() string {
-	return tplHead + tplNav + tplIndex + tplList + tplForm + tplManagedForm + tplRegister + tplReport + tplProcessor + tplAgentSettings + tplPOS + tplAbout + tplDeleteMarked + tplInfoReg + tplConstants + tplHistory + tplStages + tplJournal + tplScheduled + tplAccountReg + tplQueryBuilder + tplAllFunctions + tplSearch + tplQueryConsole + tplCodeConsole + tplGengen + tplForbidden + tplReportProblem + tplPageCustom + tplAppShell
+	return tplHead + tplNav + tplIndex + tplList + tplForm + tplManagedForm + tplRegister + tplReport + tplProcessor + tplAgentSettings + tplPOS + tplAbout + tplDeleteMarked + tplInfoReg + tplConstants + tplHistory + tplStages + tplJournal + tplScheduled + tplAccountReg + tplQueryBuilder + tplAllFunctions + tplSearch + tplQueryConsole + tplCodeConsole + tplGengen + tplForbidden + tplReportProblem + tplPageCustom + tplAppShell + tplNavigationSettings
 }
 
 const tplHead = `
@@ -1598,6 +1598,10 @@ const tplNav = `
       </details>
       {{end}}
       {{if .IsAdmin}}
+      <details class="sys-group">
+        <summary>{{t $.Lang "Настройка приложения"}}</summary>
+        <div class="sys-group-body"><a href="/ui/admin/navigation?subsystem={{.CurrentSubsystem}}">{{t $.Lang "Навигация"}}</a></div>
+      </details>
       <details class="sys-group">
         <summary>{{t $.Lang "Администрирование"}}</summary>
         <div class="sys-group-body">
@@ -2001,7 +2005,8 @@ const tplList = `
 
 {{$obRefresh := liveListRefreshOn .Entity}}
 <div class="ob-list-wrap">
-<div class="card" data-ob-live="{{lower (str .Entity.Kind)}}/{{lower .Entity.Name}}"{{if $obRefresh}} data-ob-refresh-on="{{$obRefresh}}"{{end}}>
+<div class="ob-list-content" data-ob-live="{{lower (str .Entity.Kind)}}/{{lower .Entity.Name}}"{{if $obRefresh}} data-ob-refresh-on="{{$obRefresh}}"{{end}}>
+<div class="card">
 {{if .TreeView}}
 {{/* ===== TREE VIEW ===== */}}
 {{if .TreeRows}}
@@ -2167,8 +2172,6 @@ const tplList = `
 {{end}}
 {{end}}
 </div>
-{{template "detail-panel" .}}
-</div>
 {{if and .Feed (not .TreeView)}}
 {{/* Лента: догрузка по скроллу. Без JS «Показать ещё» = переход на след. страницу. */}}
 {{if .HasNext}}
@@ -2186,6 +2189,9 @@ const tplList = `
 {{else if gt .Total 0}}
 <div style="color:#94a3b8;font-size:12px;margin-top:8px">{{t $.Lang "Всего:"}} {{.Total}}</div>
 {{end}}
+</div>
+{{template "detail-panel" .}}
+</div>
 </main>
 <script type="application/json" id="ob-list-config">{{jsJSON (dict
   "isAdmin" .IsAdmin

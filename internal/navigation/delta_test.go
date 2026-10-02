@@ -27,6 +27,29 @@ func deltaTree(t *testing.T) navigation.Tree {
 	return tree
 }
 
+func TestDeltaDiffExplicitRenameToBaseTitleClearsTranslations(t *testing.T) {
+	base := deltaTree(t)
+	desired := deltaClone(t, base)
+	desired.Sections[0].Titles = nil
+	desired.Sections[0].TitleExplicit = true
+	delta, err := navigation.Diff(base, desired, navigation.AdminLayer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(delta.Ops) != 1 || delta.Ops[0].Op != "rename" || delta.Ops[0].Title == nil || *delta.Ops[0].Title != "Study" {
+		t.Fatalf("explicit rename lost: %+v", delta.Ops)
+	}
+	got, diagnostics, err := navigation.ApplyDelta(base, delta, navigation.AdminLayer)
+	if err != nil || len(diagnostics) != 0 || !reflect.DeepEqual(got, desired) {
+		t.Fatalf("round trip: %v %v %+v", err, diagnostics, got)
+	}
+	desired = deltaClone(t, base)
+	desired.Sections[0].Titles["en"] = "Forged translation"
+	if _, err := navigation.Diff(base, desired, navigation.AdminLayer); err == nil {
+		t.Fatal("localized translations became editable")
+	}
+}
+
 func deltaFor(t *testing.T, base navigation.Tree, ops ...navigation.Operation) navigation.Delta {
 	t.Helper()
 	hash, err := base.Hash()
@@ -163,6 +186,7 @@ func TestDeltaDiffMinimalSchoolEdits(t *testing.T) {
 	}
 	want := deltaClone(t, base)
 	want.Sections[0].Title, want.Sections[0].Titles = "Common study", nil
+	want.Sections[0].TitleExplicit = true
 	want.Sections[0].Groups = append(want.Sections[0].Groups, navigation.Group{ID: custom, Title: "Control", Icon: "clipboard-check", Items: []navigation.Item{want.Sections[1].Items[0]}})
 	want.Sections[1].Items = nil
 	want.Sections[0].Groups[0].Items = []navigation.Item{want.Sections[0].Groups[0].Items[1]}

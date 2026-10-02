@@ -446,6 +446,10 @@ func (s *Server) Mount(r chi.Router) {
 
 	// Admin: user management
 	r.Get("/ui/admin/users", s.adminUsers)
+	r.Get("/ui/admin/navigation", s.adminNavigation)
+	r.Post("/ui/admin/navigation/preview", s.adminNavigationPreview)
+	r.Post("/ui/admin/navigation/save", s.adminNavigationSave)
+	r.Post("/ui/admin/navigation/reset", s.adminNavigationReset)
 	r.Get("/ui/admin/users/new", s.adminUserNew)
 	r.Post("/ui/admin/users/new", s.adminUserCreate)
 	r.Get("/ui/admin/users/{id}", s.adminUserCard)
