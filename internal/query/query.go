@@ -709,7 +709,8 @@ type sourceScope struct {
 	mainTable      string
 	mainColTypes   map[string]metadata.FieldType
 	entities       map[string]sourceEntity
-	unionFirst     int // SELECT, задающий имена результата всего UNION
+	refEntities    map[string]sourceEntity // цели одного перехода от главного источника
+	unionFirst     int                     // SELECT, задающий имена результата всего UNION
 	sourceCount    int
 	qualifiers     map[string]sourceClass
 	derivedAliases map[string]int
@@ -3398,6 +3399,9 @@ func preScanSourceContextWithOpts(tokens []tok, opts CompileOpts) sourceContext 
 		if class == sourceClassEntity {
 			if info, found := scopeEntityInfo(tokens[i+2].val, opts); found {
 				entityInfo = &info
+				if isMain {
+					scope.refEntities = scopeReferenceEntities(tokens[i+2].val, opts)
+				}
 				scope.entities[entityName] = info
 				scope.entities[sourceToTable(typeUpper, tokens[i+2].val)] = info
 			}
@@ -3618,6 +3622,11 @@ func (ctx sourceContext) projectionIsSystemColumn(
 		tokens[start+2].kind == tIdent && strings.EqualFold(tokens[start+2].val, name) {
 		return ctx.systemColumnIdentifierAt(tokens, start+2, seen)
 	}
+	if end-start == 5 && tokens[start].kind == tIdent && tokens[start+1].kind == tDot &&
+		tokens[start+2].kind == tIdent && tokens[start+3].kind == tDot &&
+		tokens[start+4].kind == tIdent && strings.EqualFold(tokens[start+4].val, name) {
+		return ctx.systemColumnIdentifierAt(tokens, start+4, seen)
+	}
 	return false
 }
 
@@ -3663,7 +3672,22 @@ func (ctx sourceContext) systemColumnIdentifierAt(tokens []tok, tokenPos int, se
 	scope := ctx.scopes[scopeID]
 	if tokenPos >= 2 && tokens[tokenPos-1].kind == tDot {
 		qualifier := lowerFast(tokens[tokenPos-2].val)
+		// Главный переводчик разворачивает один переход по ссылке. Сохраняем
+		// то же происхождение колонки для внешней производной таблицы.
 		if objectAlias {
+			if target, reference := scope.refEntities[qualifier]; reference {
+				if tokenPos >= 4 && tokens[tokenPos-3].kind == tDot {
+					if lowerFast(tokens[tokenPos-4].val) != scope.mainTable {
+						return false
+					}
+				} else if _, source := scope.qualifiers[qualifier]; source {
+					// Обычный квалификатор источника имеет приоритет над ссылкой.
+					_, resolved := scope.entitySystemColumn(qualifier, name)
+					return resolved
+				}
+				_, resolved := target.systemColumn(name)
+				return resolved
+			}
 			var found bool
 			scope, found = ctx.qualifierScopeAt(tokenPos, qualifier)
 			if !found {
@@ -4811,6 +4835,27 @@ func scopeEntityInfo(name string, opts CompileOpts) (sourceEntity, bool) {
 		return sourceEntity{document: e.Kind == metadata.KindDocument, fields: fields}, true
 	}
 	return sourceEntity{}, false
+}
+
+// scopeReferenceEntities сохраняет метаданные целей ссылок главного источника,
+// для которых основной переводчик строит авто-JOIN. Второй переход не добавляем.
+func scopeReferenceEntities(name string, opts CompileOpts) map[string]sourceEntity {
+	for _, e := range opts.Entities {
+		if !strings.EqualFold(e.Name, name) {
+			continue
+		}
+		targets := make(map[string]sourceEntity)
+		for _, f := range e.Fields {
+			if f.RefEntity == "" {
+				continue
+			}
+			if target, ok := scopeEntityInfo(f.RefEntity, opts); ok {
+				targets[lowerFast(f.Name)] = target
+			}
+		}
+		return targets
+	}
+	return nil
 }
 
 // entitySystemColumn разрешает системную колонку объекта по ФАКТИЧЕСКИМ
