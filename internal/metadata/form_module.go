@@ -352,7 +352,7 @@ func FormChoiceParentFieldOf(entity *Entity) *Field {
 }
 
 // FormChoiceCondition описывает одно серверно проверяемое условие подбора.
-// Ровно одно из From и Value обязательно.
+// Ровно одно из From, Value и Ref обязательно.
 //
 // Value — литерал из конфигурации, boolean: служебное поле is_folder и булев
 // реквизит справочника («только немуниципальные адреса»). Указатель отличает
@@ -365,11 +365,20 @@ func FormChoiceParentFieldOf(entity *Entity) *Field {
 // по ссылке (план 183, срез B1). Разбирается через ParseFormChoiceSource.
 // Конец такого пути — ссылочный реквизит либо, для строкового Field и eq,
 // строковый: дом адресного классификатора хранит ИД улицы в ВладелецКод.
+//
+// Ref — постоянная ссылка: UUID записи справочника, на который ссылается Field
+// (для parent_id — самого справочника), литералом в метаданных формы (#1820).
+// Условие от выбора пользователя не зависит: «только из папки Рабочие». Браузер
+// значение не присылает. Пустой, нулевой и неразбираемый UUID отклоняет
+// onebase check. Если записи с таким UUID нет или пользователь её не видит,
+// подбор пуст при любом операторе (fail-closed): иначе пропавшая папка
+// раскрыла бы весь справочник.
 type FormChoiceCondition struct {
 	Field string             `yaml:"field"`
 	Op    FormChoiceOperator `yaml:"op"`
 	From  string             `yaml:"from,omitempty"`
 	Value *bool              `yaml:"value,omitempty"`
+	Ref   string             `yaml:"ref,omitempty"`
 }
 
 // FormChoiceSource — разобранный источник условия подбора.
