@@ -2646,6 +2646,24 @@ func (s *Server) handleProcessorFormEventMode(w http.ResponseWriter, r *http.Req
 			disableDialogBuiltinsForClose(vars)
 		}
 
+		// Навигация (#1557): ОткрытьФорму(Ссылка) из формы обработки — самое
+		// частое место для «нашли документ — открыли его». Словарь билтинов у
+		// check общий, поэтому без регистрации здесь вызов проходил проверку и
+		// падал в рантайме unknown function — тот же класс, что #1683.
+		//
+		// В ПередЗакрытием навигации быть не должно: закрытие не ждёт ответа
+		// пользователя, и переход, назначенный из него, клиент не выполняет —
+		// форма просто закрывается, а обработчик считает, что отправил человека
+		// на другой объект. Запрет уже поставил disableDialogBuiltinsForClose
+		// выше; регистрация здесь его перезаписывала. Условие надёжнее простой
+		// перестановки строк: при следующей правке порядка запрет не потеряется.
+		var navigation *navigationPayload
+		if closeInv == nil {
+			navFn := newNavigationBuiltin(&navigation, s.reg, s.store, auth.UserFromContext(r.Context()))
+			vars["ОткрытьФорму"] = navFn
+			vars["OpenForm"] = navFn
+		}
+
 		condRuntime := newFormConditionalRuntime(form)
 		for k, v := range condRuntime.builtins() {
 			vars[k] = v
@@ -2714,6 +2732,9 @@ func (s *Server) handleProcessorFormEventMode(w http.ResponseWriter, r *http.Req
 		if question.Variants != nil {
 			q := question
 			resp.Question = &q
+		}
+		if navigation != nil {
+			resp.Navigation = navigation
 		}
 		resp.ChoiceList = choiceItems
 		resp.Dirty = boolPtr(!formOpenEvent(elementName, eventName) && transientManagedStateDirty(obj, fieldsBefore, tablesBefore))
