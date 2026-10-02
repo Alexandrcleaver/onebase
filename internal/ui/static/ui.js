@@ -4222,6 +4222,8 @@ function obRefChoiceSnapshot(sel) {
     values[path] = control && control.value != null ? String(control.value) : '';
   });
   var query = '&form_entity=' + encodeURIComponent(ctx.form_entity) +
+    // Форма обработки (#1840): вид владельца — из серверного контекста.
+    (ctx.form_kind ? '&form_kind=' + encodeURIComponent(ctx.form_kind) : '') +
     '&form=' + encodeURIComponent(ctx.form) +
     '&element=' + encodeURIComponent(ctx.element) +
     '&sources=' + encodeURIComponent(JSON.stringify(values));
@@ -4231,7 +4233,7 @@ function obRefChoiceSnapshot(sel) {
   var fingerprintParts = paths.map(function (path) { return [path, values[path]]; });
   return {
     query: query,
-    fingerprint: JSON.stringify([ctx.form_entity, ctx.form, ctx.element, fingerprintParts, ownerQuery]),
+    fingerprint: JSON.stringify([ctx.form_entity, ctx.form_kind || '', ctx.form, ctx.element, fingerprintParts, ownerQuery]),
     selected: sel.value == null ? '' : String(sel.value)
   };
 }
