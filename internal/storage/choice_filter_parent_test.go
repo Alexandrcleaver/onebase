@@ -163,6 +163,25 @@ func TestChoiceFilterParentIDMatrix(t *testing.T) {
 			}
 		})
 
+		// eq_or_empty из #1781 применим и к parent_id: «пусто» — корень.
+		// Колонка — служебная parent_id, а не имя синтетического реквизита:
+		// ошибка колонки дала бы SQL-ошибку либо чужие строки.
+		t.Run("eq_or_empty — дети группы и корневые записи", func(t *testing.T) {
+			got := choiceParentNames(t, db, f, storage.ChoicePredicate{
+				Field: "parent_id", Op: metadata.FormChoiceOpEqualOrEmpty, Value: f.tech})
+			if strings.Join(got, ",") != want("Кухня", "утюг", "Техника", "Прочее", "корневой элемент") {
+				t.Fatalf("дети «Техники» и корни = %v", got)
+			}
+		})
+
+		t.Run("eq_or_empty без источника — только корневые записи", func(t *testing.T) {
+			got := choiceParentNames(t, db, f, storage.ChoicePredicate{
+				Field: "parent_id", Op: metadata.FormChoiceOpEqualOrEmpty, Value: nil})
+			if strings.Join(got, ",") != want("Техника", "Прочее", "корневой элемент") {
+				t.Fatalf("корни = %v", got)
+			}
+		})
+
 		t.Run("корневые записи не проходят никакой отбор", func(t *testing.T) {
 			for _, root := range []uuid.UUID{f.tech, f.other} {
 				for _, op := range []metadata.FormChoiceOperator{metadata.FormChoiceOpEqual, metadata.FormChoiceOpInHierarchy} {
