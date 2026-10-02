@@ -161,15 +161,21 @@ func (s *Server) projectPersonalNavigation(r *http.Request, tree navigation.Tree
 	result := navigation.Tree{Version: tree.Version, Context: tree.Context, Sections: []navigation.Section{}}
 	for _, section := range tree.Sections {
 		section.Items = items(section.Items)
+		keepSection := len(section.Items) > 0 || strings.HasPrefix(section.ID, "usr:") || keep[section.ID] != "" || empty[section.ID]
 		var groups []navigation.Group
 		for _, group := range section.Groups {
 			group.Items = items(group.Items)
 			if len(group.Items) > 0 || strings.HasPrefix(group.ID, "usr:") || keep[group.ID] != "" || empty[group.ID] {
 				groups = append(groups, group)
+				// An empty personal child must not expose a closed inherited
+				// parent. Its full intent remains server-side for regrant.
+				if len(group.Items) > 0 || !strings.HasPrefix(group.ID, "usr:") {
+					keepSection = true
+				}
 			}
 		}
 		section.Groups = groups
-		if len(section.Items) > 0 || len(section.Groups) > 0 || strings.HasPrefix(section.ID, "usr:") || keep[section.ID] != "" || empty[section.ID] {
+		if keepSection {
 			result.Sections = append(result.Sections, section)
 		}
 	}

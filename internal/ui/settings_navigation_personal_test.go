@@ -461,6 +461,119 @@ func personalGroupByID(t *testing.T, state *navigationBootstrap, id string) *nav
 	return nil
 }
 
+func TestPersonalNavigation_ClosedParentPreservesPersonalFolder(t *testing.T) {
+	for _, withPrivateItem := range []bool{false, true} {
+		name := "empty-folder"
+		if withPrivateItem {
+			name = "folder-with-revoked-item"
+		}
+		t.Run(name, func(t *testing.T) {
+			dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+				f := schoolNavigationFixture(t, db, "testdata/navigation-school", true)
+				ctx := context.Background()
+				admin := f.editor(t, personalSchool)
+				visible := personalSection(t, &admin, "cfg:academic-years")
+				visible.Groups = append(visible.Groups, navigation.Group{ID: "new:shared-empty", Title: "Shared empty folder"})
+				if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, admin)); rec.Code != 303 {
+					t.Fatal("common folder", rec.Code)
+				}
+				grant := &auth.Role{Name: "TemporaryClosedAccess"}
+				grant.Permissions.Catalogs = map[string][]string{"ClosedSentinel": {"read"}}
+				if err := f.server.authRepo.SyncRoles(ctx, []*auth.Role{grant}); err != nil {
+					t.Fatal(err)
+				}
+				alice, err := f.server.authRepo.GetByLogin(ctx, "alice")
+				if err != nil || alice == nil {
+					t.Fatal(err)
+				}
+				if err := f.server.authRepo.AssignRole(ctx, alice.ID, grant.ID); err != nil {
+					t.Fatal(err)
+				}
+				state := f.personalEditor(t, "alice", personalSchool)
+				closed := personalSection(t, &state, "cfg:closed-sentinel-section")
+				folder := navigation.Group{ID: "new:closed-parent-folder", Title: "Private personal folder"}
+				if withPrivateItem {
+					folder.Items = closed.Groups[0].Items
+					closed.Groups[0].Items = nil
+				}
+				closed.Groups = append(closed.Groups, folder)
+				visible = personalSection(t, &state, "cfg:academic-years")
+				visible.Groups = append(visible.Groups, navigation.Group{ID: "new:visible-empty", Title: "Visible personal empty folder"})
+				state.Desired.Sections = append(state.Desired.Sections, navigation.Section{ID: "new:personal-empty-section", Title: "Personal empty section"})
+				personalSave(t, f, "alice", state)
+				state = f.personalEditor(t, "alice", personalSchool)
+				closed = personalSection(t, &state, "cfg:closed-sentinel-section")
+				folderID := closed.Groups[len(closed.Groups)-1].ID
+				if !strings.HasPrefix(folderID, "usr:") {
+					t.Fatal("personal identity missing", folderID)
+				}
+				if err := f.server.authRepo.UnassignRole(ctx, alice.ID, grant.ID); err != nil {
+					t.Fatal(err)
+				}
+				if rec := f.request(t, "GET", "/ui/catalog/closedsentinel", "alice", nil); rec.Code != 403 {
+					t.Fatal("revoked direct URL", rec.Code)
+				}
+				admin = f.editor(t, personalSchool)
+				personalSection(t, &admin, "cfg:closed-sentinel-section").Title = "NEW_PRIVATE_SECTION_SENTINEL"
+				personalSection(t, &admin, "cfg:closed-sentinel-section").Groups[0].Title = "NEW_PRIVATE_GROUP_SENTINEL"
+				if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, admin)); rec.Code != 303 {
+					t.Fatal("common rename", rec.Code)
+				}
+				checkPrivate := func(rec *httptest.ResponseRecorder) {
+					t.Helper()
+					if rec.Code != 200 {
+						t.Error("private response status", rec.Code)
+					}
+					for _, token := range []string{"NEW_PRIVATE_", "SECRET_", "closed-sentinel", "ClosedSentinel", folderID, "Private personal folder"} {
+						if strings.Contains(rec.Body.String(), token) {
+							t.Error("closed metadata leaked", token)
+						}
+					}
+				}
+				checkPrivate(f.request(t, "GET", "/ui/settings/navigation?subsystem="+url.QueryEscape(personalSchool), "alice", nil))
+				checkPrivate(f.request(t, "GET", "/ui?subsystem="+url.QueryEscape(personalSchool), "alice", nil))
+				state = f.personalEditor(t, "alice", personalSchool)
+				assertEmptyFolders := func(state navigationBootstrap) {
+					t.Helper()
+					var shared, personal, ownSection bool
+					for _, section := range state.Desired.Sections {
+						if strings.HasPrefix(section.ID, "usr:") && section.Title == "Personal empty section" {
+							ownSection = true
+						}
+						for _, group := range section.Groups {
+							shared = shared || strings.HasPrefix(group.ID, "adm:") && group.Title == "Shared empty folder" && len(group.Items) == 0
+							personal = personal || strings.HasPrefix(group.ID, "usr:") && group.Title == "Visible personal empty folder" && len(group.Items) == 0
+						}
+					}
+					if !shared || !personal || !ownSection {
+						t.Error("accessible empty folders lost", shared, personal, ownSection)
+					}
+				}
+				assertEmptyFolders(state)
+				personalSection(t, &state, "cfg:academic-years").Icon = "book-open"
+				checkPrivate(f.request(t, "POST", "/ui/settings/navigation/preview", "alice", personalNavigationForm(t, state)))
+				if rec := f.request(t, "POST", "/ui/settings/navigation/save", "alice", personalNavigationForm(t, state)); rec.Code != 303 {
+					t.Errorf("visible save after revoke: %d", rec.Code)
+				}
+				assertEmptyFolders(f.personalEditor(t, "alice", personalSchool))
+				if err := f.server.authRepo.AssignRole(ctx, alice.ID, grant.ID); err != nil {
+					t.Fatal(err)
+				}
+				state = f.personalEditor(t, "alice", personalSchool)
+				closed = personalSection(t, &state, "cfg:closed-sentinel-section")
+				if closed.Title != "NEW_PRIVATE_SECTION_SENTINEL" || personalSection(t, &state, "cfg:academic-years").Icon != "book-open" {
+					t.Error("common title or visible edit lost")
+				}
+				restored := personalGroupByID(t, &state, folderID)
+				if restored.Title != "Private personal folder" || withPrivateItem && (len(restored.Items) != 1 || restored.Items[0].ID != "cfg:closed-sentinel-item") || !withPrivateItem && len(restored.Items) != 0 {
+					t.Error("private folder intent lost after regrant", restored)
+				}
+				assertEmptyFolders(state)
+			})
+		})
+	}
+}
+
 func TestPersonalNavigation_PrivatePlacementWithAccessibleAnchor(t *testing.T) {
 	for _, scenario := range []struct {
 		name string
