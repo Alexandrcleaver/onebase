@@ -121,6 +121,14 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	}
 
 	total, _ := s.store.CountList(r.Context(), entity.Name, entity, params)
+	// Deletions can remove the current page while its URL remains open.
+	// Keep a paginated list usable when its last page disappears.
+	if !feed && params.Limit > 0 && params.Offset >= total {
+		params.Offset = 0
+		if total > 0 {
+			params.Offset = ((total - 1) / params.Limit) * params.Limit
+		}
+	}
 
 	rows, err := s.store.List(r.Context(), entity.Name, entity, params)
 	if err != nil {

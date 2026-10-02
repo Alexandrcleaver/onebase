@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ivantit66/onebase/internal/access"
 	"github.com/ivantit66/onebase/internal/metadata"
+	processorpkg "github.com/ivantit66/onebase/internal/processor"
 	"github.com/ivantit66/onebase/internal/storage"
 )
 
@@ -20,11 +21,18 @@ const maxChoiceSourcesJSON = 16 << 10
 // controls at request time, while the server restores Field/Op from the form in
 // the registry and never trusts them from the browser.
 type managedChoiceContext struct {
-	FormEntity string            `json:"form_entity"`
-	Form       string            `json:"form"`
-	Element    string            `json:"element"`
-	Sources    map[string]string `json:"sources,omitempty"` // full metadata path -> browser control name
+	FormEntity string `json:"form_entity"`
+	// FormKind различает владельца формы: пусто — документ или справочник,
+	// "processor" — обработка (#1840). Имена обработок и сущностей живут в
+	// разных пространствах, поэтому вид едет явно, а не угадывается по имени.
+	FormKind string            `json:"form_kind,omitempty"`
+	Form     string            `json:"form"`
+	Element  string            `json:"element"`
+	Sources  map[string]string `json:"sources,omitempty"` // full metadata path -> browser control name
 }
+
+// choiceFormKindProcessor — значение form_kind для формы обработки.
+const choiceFormKindProcessor = "processor"
 
 type resolvedChoiceRequest struct {
 	Predicates []storage.ChoicePredicate
@@ -162,12 +170,14 @@ func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, f
 	predicates := make([]storage.ChoicePredicate, 0, len(element.ChoiceFilter))
 	targetDecisions := s.fieldDecisions(ctx, target)
 	for _, condition := range element.ChoiceFilter {
+		// Match the checker and SQL field lookup before applying target masks.
+		fieldName := strings.TrimSpace(condition.Field)
 		// The filtered result and its total reveal a target field even when the
 		// field itself is hidden from the response. Keep mask and hide identical.
-		if choiceAttrMasked(targetDecisions, condition.Field) {
+		if choiceAttrMasked(targetDecisions, fieldName) {
 			return nil, true, nil
 		}
-		predicate := storage.ChoicePredicate{Field: condition.Field, Op: condition.Op}
+		predicate := storage.ChoicePredicate{Field: fieldName, Op: condition.Op}
 		if condition.Value != nil {
 			predicate.Value = *condition.Value
 			predicates = append(predicates, predicate)
@@ -198,7 +208,7 @@ func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, f
 			predicates = append(predicates, predicate)
 			continue
 		}
-		value, found, err := s.deepChoiceSourceValue(ctx, owner, form, source, id)
+		value, found, err := s.deepChoiceSourceValue(ctx, owner, form, source, id, choiceTargetFieldIsString(target, fieldName))
 		if err != nil {
 			return nil, false, err
 		}
@@ -218,35 +228,64 @@ func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, f
 // причины сразу: записи нет, она закрыта строковым доступом, реквизит закрыт
 // полевой политикой или просто пуст. Различать их в ответе нельзя — иначе
 // пустой подбор рассказывал бы, существует ли запись и что в ней лежит.
-func (s *Server) deepChoiceSourceValue(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, source metadata.FormChoiceSource, id uuid.UUID) (uuid.UUID, bool, error) {
+//
+// Конечный реквизит — ссылка (значение uuid.UUID) или строка (значение
+// string, только для строкового реквизита цели — textTarget): так ИД улицы
+// адресного классификатора сравнивается со строковым ВладелецКод дома.
+// Проверки доступа у обоих одинаковые.
+func (s *Server) deepChoiceSourceValue(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, source metadata.FormChoiceSource, id uuid.UUID, textTarget bool) (any, bool, error) {
 	lead := s.reg.GetEntity(formChoiceRefEntity(owner, form, source.Root+"."+source.Field))
 	if lead == nil {
-		return uuid.Nil, false, fmt.Errorf("unknown choice source entity")
+		return nil, false, fmt.Errorf("unknown choice source entity")
 	}
 	attr, exists := entityFieldByName(lead, source.Attr)
-	if !exists || strings.TrimSpace(attr.RefEntity) == "" {
-		return uuid.Nil, false, fmt.Errorf("choice source attribute %q is not a reference", source.Attr)
+	isRef := exists && strings.TrimSpace(attr.RefEntity) != ""
+	isText := exists && !isRef && attr.Type == metadata.FieldTypeString
+	if !isRef && !isText {
+		return nil, false, fmt.Errorf("choice source attribute %q is neither a reference nor a string", source.Attr)
+	}
+	// Род конца пути сверяется с реквизитом цели по метаданным, до чтения
+	// записи: ошибка, которая зависела бы от того, нашлась ли запись, выдала
+	// бы её существование.
+	if isText != textTarget {
+		return nil, false, fmt.Errorf("choice source attribute %q does not match the filtered field", source.Attr)
 	}
 	if choiceAttrMasked(s.fieldDecisions(ctx, lead), attr.Name) {
-		return uuid.Nil, false, nil
+		return nil, false, nil
 	}
 	params, err := s.rowFilterFor(ctx, lead, "read", storage.ListParams{})
 	if err != nil {
-		return uuid.Nil, false, nil // нет доступа к посреднику — отбирать нечем
+		return nil, false, nil // нет доступа к посреднику — отбирать нечем
 	}
 	rows, err := s.store.GetFieldsByIDsFiltered(ctx, lead, []uuid.UUID{id}, []metadata.Field{attr}, params.RowFilter)
 	if err != nil {
-		return uuid.Nil, false, err
+		return nil, false, err
 	}
 	row, ok := rows[id.String()]
 	if !ok {
-		return uuid.Nil, false, nil
+		return nil, false, nil
+	}
+	if isText {
+		// Строка сравнивается как есть — так же, как `=` в запросе. Пустая
+		// или из одних пробелов — отбирать нечем, как и пустая ссылка.
+		text, _ := row[attr.Name].(string)
+		if strings.TrimSpace(text) == "" {
+			return nil, false, nil
+		}
+		return text, true, nil
 	}
 	target, parseErr := uuid.Parse(strings.TrimSpace(refValueString(row[attr.Name])))
 	if parseErr != nil || target == uuid.Nil {
-		return uuid.Nil, false, nil
+		return nil, false, nil
 	}
 	return target, true, nil
+}
+
+// choiceTargetFieldIsString — строковый нессылочный ли реквизит
+// справочника-цели: только с ним сравнивается строковый конец пути.
+func choiceTargetFieldIsString(target *metadata.Entity, name string) bool {
+	field, ok := entityFieldByName(target, name)
+	return ok && field.Type == metadata.FieldTypeString && strings.TrimSpace(field.RefEntity) == ""
 }
 
 // choiceAttrMasked — закрыт ли реквизит полевой политикой. Ключи
@@ -311,7 +350,7 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 	// ignored unknown query parameters, so adding it must not turn an otherwise
 	// context-free request into a 400. Identity/source parameters do opt in and
 	// therefore require the complete trusted metadata context below.
-	contextKeys := []string{"form_entity", "form", "element", "sources"}
+	contextKeys := []string{"form_entity", "form_kind", "form", "element", "sources"}
 	contextPresent := false
 	for _, key := range contextKeys {
 		if _, ok := query[key]; ok {
@@ -343,14 +382,14 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 	if err != nil {
 		return nil, err
 	}
-
-	owner := s.reg.GetEntity(ownerName)
-	if owner == nil {
-		return nil, fmt.Errorf("unknown form entity")
+	formKind, err := oneQueryValue(query, "form_kind", false)
+	if err != nil {
+		return nil, err
 	}
-	form := findManagedFormByName(owner, formName)
-	if form == nil {
-		return nil, fmt.Errorf("unknown managed form")
+
+	owner, form, err := s.choiceFormOwner(r, formKind, ownerName, formName)
+	if err != nil {
+		return nil, err
 	}
 	element := findChoiceElementByID(form, elementID)
 	if element == nil || (len(element.ChoiceFilter) == 0 && !element.ChoiceFolders) {
@@ -378,6 +417,41 @@ func (s *Server) resolveChoiceRequest(r *http.Request, target *metadata.Entity) 
 		resolved.Selected = &id
 	}
 	return resolved, nil
+}
+
+// choiceFormOwner восстанавливает владельца формы и саму форму из реестра.
+// У обработки владелец — её виртуальная сущность (поля — параметры), форма —
+// управляемая форма обработки; контекст принимается только от того, кто
+// вправе открыть эту форму (processor/<имя>/run, для внешней — допуск
+// администратора), иначе подбор формы обработки стал бы обходным каналом.
+func (s *Server) choiceFormOwner(r *http.Request, formKind, ownerName, formName string) (*metadata.Entity, *metadata.FormModule, error) {
+	switch formKind {
+	case "":
+		owner := s.reg.GetEntity(ownerName)
+		if owner == nil {
+			return nil, nil, fmt.Errorf("unknown form entity")
+		}
+		form := findManagedFormByName(owner, formName)
+		if form == nil {
+			return nil, nil, fmt.Errorf("unknown managed form")
+		}
+		return owner, form, nil
+	case choiceFormKindProcessor:
+		proc := s.reg.GetProcessor(ownerName)
+		if proc == nil {
+			return nil, nil, fmt.Errorf("unknown form processor")
+		}
+		if !s.can(r, "processor", proc.Name, "run") || !s.canRunExternalProc(r, proc) {
+			return nil, nil, fmt.Errorf("form processor is not available")
+		}
+		form := proc.ManagedForm()
+		if form == nil || !strings.EqualFold(form.Name, formName) {
+			return nil, nil, fmt.Errorf("unknown managed form")
+		}
+		return processorVirtualEntity(proc), form, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown form kind")
+	}
 }
 
 func (s *Server) choiceSelectedAllowed(ctx context.Context, target *metadata.Entity, id uuid.UUID, predicates []storage.ChoicePredicate, folders bool) (bool, error) {
@@ -477,6 +551,19 @@ func (s *Server) initialChoiceOptions(ctx context.Context, owner *metadata.Entit
 // into choice_filter and publishes opaque picker context for ui.js. Other
 // managed and all autogen reference fields keep the legacy path unchanged.
 func (s *Server) applyManagedChoiceFilters(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, data map[string]any) {
+	s.applyChoiceFilters(ctx, owner, form, "", data)
+}
+
+// applyProcessorChoiceFilters — то же для управляемой формы обработки:
+// владелец — виртуальная сущность обработки, контекст помечен form_kind (#1840).
+func (s *Server) applyProcessorChoiceFilters(ctx context.Context, proc *processorpkg.Processor, data map[string]any) {
+	if proc == nil {
+		return
+	}
+	s.applyChoiceFilters(ctx, processorVirtualEntity(proc), proc.ManagedForm(), choiceFormKindProcessor, data)
+}
+
+func (s *Server) applyChoiceFilters(ctx context.Context, owner *metadata.Entity, form *metadata.FormModule, formKind string, data map[string]any) {
 	if owner == nil || form == nil || data == nil {
 		return
 	}
@@ -518,6 +605,7 @@ func (s *Server) applyManagedChoiceFilters(ctx context.Context, owner *metadata.
 		}
 		encoded, err := json.Marshal(managedChoiceContext{
 			FormEntity: owner.Name,
+			FormKind:   formKind,
 			Form:       form.Name,
 			Element:    element.ID,
 			Sources:    controls,
