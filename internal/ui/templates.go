@@ -1309,7 +1309,7 @@ func normalizedFormHotkey(value string) string {
 }
 
 func templateSource() string {
-	return tplHead + tplNav + tplIndex + tplList + tplForm + tplManagedForm + tplRegister + tplReport + tplProcessor + tplAgentSettings + tplPOS + tplAbout + tplDeleteMarked + tplInfoReg + tplConstants + tplHistory + tplStages + tplJournal + tplScheduled + tplAccountReg + tplQueryBuilder + tplAllFunctions + tplSearch + tplQueryConsole + tplCodeConsole + tplGengen + tplForbidden + tplReportProblem + tplPageCustom + tplAppShell
+	return tplHead + tplNav + tplIndex + tplList + tplForm + tplManagedForm + tplRegister + tplReport + tplProcessor + tplAgentSettings + tplPOS + tplAbout + tplDeleteMarked + tplInfoReg + tplConstants + tplHistory + tplStages + tplJournal + tplScheduled + tplAccountReg + tplQueryBuilder + tplAllFunctions + tplSearch + tplQueryConsole + tplCodeConsole + tplGengen + tplForbidden + tplReportProblem + tplPageCustom + tplAppShell + tplNavigationSettings
 }
 
 const tplHead = `
@@ -1598,6 +1598,10 @@ const tplNav = `
       </details>
       {{end}}
       {{if .IsAdmin}}
+      <details class="sys-group">
+        <summary>{{t $.Lang "Настройка приложения"}}</summary>
+        <div class="sys-group-body"><a href="/ui/admin/navigation?subsystem={{.CurrentSubsystem}}">{{t $.Lang "Навигация"}}</a></div>
+      </details>
       <details class="sys-group">
         <summary>{{t $.Lang "Администрирование"}}</summary>
         <div class="sys-group-body">
