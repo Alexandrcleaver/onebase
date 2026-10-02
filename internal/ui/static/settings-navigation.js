@@ -6,6 +6,8 @@
     bootstrap.dataset.initialized = '1';
     var data = JSON.parse(bootstrap.textContent), labels = data.labels;
     var desired = clone(data.desired), selected = '', counter = 0, version = 0;
+    var path = data.path || '/ui/admin/navigation', ownedPrefix = data.ownedPrefix || 'adm:';
+    var renamed = new Set(data.renamed || []);
     var dirty = false, submitting = false, timer, dragged = '';
     var tree = document.getElementById('navigation-tree');
     var properties = document.getElementById('navigation-properties');
@@ -44,7 +46,18 @@
       var el = element('button', text); el.type = 'button';
       el.addEventListener('click', action); return el;
     }
-    function synchronize() { hidden.value = JSON.stringify(desired); }
+    function synchronize() {
+      hidden.value = JSON.stringify(desired);
+      if (data.personal) document.getElementById('navigation-renamed').value = JSON.stringify(renameIntent());
+    }
+    function renameIntent() {
+      return Array.from(renamed).filter(function(id) { return find(id) && find(id, data.base); }).sort();
+    }
+    function requestBody() {
+      var body = new URLSearchParams({subsystem:data.subsystem, revision:data.revision, desired:JSON.stringify(desired)});
+      if (data.personal) { body.set('base_revision', data.baseRevision); body.set('renamed', JSON.stringify(renameIntent())); }
+      return body;
+    }
     function changed(id, preserveInput) {
       if (submitting) return;
       selected = id || selected; dirty = true; version++;
@@ -99,6 +112,7 @@
         var choose = button(label(entry.node), function () { selected = entry.node.id; renderTree(true); tree.querySelector('[data-node-id="'+selected+'"]').focus(); });
         choose.dataset.nodeId = entry.node.id;
         row.appendChild(choose);
+        if (data.personal) row.appendChild(element('small', labels[(data.origins || {})[entry.node.id] || 'personal']));
         ['up','down','in','out'].forEach(function (direction) {
           var control = button(labels[direction], function () { move(entry.node.id, direction); });
           control.dataset.action = direction;
@@ -107,7 +121,7 @@
             (direction === 'out' && (entry.kind !== 'item' || entry.parent === entry.section));
           row.appendChild(control);
         });
-        row.appendChild(button(entry.node.id.indexOf('cfg:') === 0 ? labels.hide : labels.remove, function () {
+        row.appendChild(button(entry.node.id.indexOf(ownedPrefix) === 0 || entry.node.id.indexOf('new:') === 0 ? labels.remove : labels.hide, function () {
           if (submitting) return;
           entry.list.splice(entry.index, 1);
           selected = entry.parent ? entry.parent.id : (desired.sections[0] || {}).id || '';
@@ -132,7 +146,7 @@
       var entry = find(selected); if (!entry) return;
       function field(name, input) { var container = element('label', name); container.appendChild(input); properties.appendChild(container); }
       var title = element('input'); title.type = 'text'; title.value = entry.node.title || ''; title.placeholder = label(entry.node);
-      title.addEventListener('input', function () { if(submitting)return; entry.node.title = title.value; delete entry.node.titles; if (entry.kind === 'section') entry.node.title_explicit = true; changed(entry.node.id, true); });
+      title.addEventListener('input', function () { if(submitting)return; entry.node.title = title.value; delete entry.node.titles; if (entry.kind === 'section') entry.node.title_explicit = true; if (data.personal && find(entry.node.id, data.base)) renamed.add(entry.node.id); changed(entry.node.id, true); });
       field(labels.title, title);
       var icon = element('select');
       [''].concat(data.icons || []).forEach(function (name) { var option = element('option', name || '—'); option.value = name; icon.appendChild(option); });
@@ -199,8 +213,8 @@
     }
     function requestPreview() {
       var requested = version;
-      var body = new URLSearchParams({subsystem:data.subsystem, revision:data.revision, desired:JSON.stringify(desired)});
-      return fetch('/ui/admin/navigation/preview', {method:'POST', credentials:'same-origin', headers:{Accept:'application/json'}, body:body})
+      var body = requestBody();
+      return fetch(path+'/preview', {method:'POST', credentials:'same-origin', headers:{Accept:'application/json'}, body:body})
         .then(function(response){if(!response.ok)throw new Error(labels.error);return response.json();})
         .then(function(result){if(requested === version && !submitting)renderPreview(result.preview);})
         .catch(function(){if(requested === version && !submitting)status.textContent = labels.error;});
@@ -221,8 +235,8 @@
       event.preventDefault();
       if (submitting) return;
       synchronize(); submitting = true; version++; clearTimeout(timer);
-      var body = new URLSearchParams({subsystem:data.subsystem, revision:data.revision, desired:hidden.value});
-      fetch('/ui/admin/navigation/save', {method:'POST', credentials:'same-origin', headers:{Accept:'application/json'}, body:body})
+      var body = requestBody();
+      fetch(path+'/save', {method:'POST', credentials:'same-origin', headers:{Accept:'application/json'}, body:body})
         .then(function(response) {
           if (response.status === 409) {
             return response.json().then(function(result) {
@@ -231,7 +245,7 @@
               status.appendChild(button(labels.reload, function () {
                 if (!window.confirm(labels.reloadConfirm)) return;
                 submitting = true;
-                window.location.assign('/ui/admin/navigation?subsystem='+encodeURIComponent(data.subsystem));
+                window.location.assign(path+'?subsystem='+encodeURIComponent(data.subsystem));
               }));
               // Show the winner's current preview while keeping this tab's draft
               // and old revision. Reload is an explicit choice, never overwrite.

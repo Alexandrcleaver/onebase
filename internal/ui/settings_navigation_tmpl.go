@@ -4,33 +4,34 @@ const tplNavigationSettings = `
 {{define "page-navigation-settings"}}
 {{template "head" .}}{{template "nav" .}}
 <main id="navigation-settings" style="padding:20px;max-width:1500px;margin:auto">
-<h1>{{t .Lang "Настройка приложения"}} → {{t .Lang "Навигация"}}</h1>
-<p>{{t .Lang "Общая настройка базы. Изменения меню видны всем пользователям с учётом их прав."}}</p>
-<form method="GET" action="/ui/admin/navigation">
+<h1>{{t .Lang .NavigationTitle}} → {{t .Lang "Навигация"}}</h1>
+<p>{{t .Lang .NavigationDescription}}</p>
+<form method="GET" action="{{.NavigationPath}}">
 <label>{{t .Lang "Раздел"}} <select name="subsystem">
 <option value="">{{t .Lang "Главная"}}</option>
 {{range .Subsystems}}<option value="{{.Name}}" {{if eq .Name $.NavigationSubsystem}}selected{{end}}>{{.DisplayName $.Lang}}</option>{{end}}
 </select></label><button type="submit">{{t .Lang "Открыть"}}</button>
 </form>
 {{if .NavigationSaved}}<p role="status">{{t .Lang "Меню сохранено"}}</p>{{end}}
-{{if .NavigationMessage}}<p role="alert" class="error">{{.NavigationMessage}}</p><a href="/ui/admin/navigation?subsystem={{.NavigationSubsystem}}">{{t .Lang "Загрузить актуальную версию"}}</a>{{end}}
+{{if .NavigationMessage}}<p role="alert" class="error">{{.NavigationMessage}}</p><a href="{{.NavigationPath}}?subsystem={{.NavigationSubsystem}}">{{t .Lang "Загрузить актуальную версию"}}</a>{{end}}
 {{if .NavigationDiagnostics}}<div role="alert" class="error">
 <p>{{t .Lang "Есть предупреждения настройки меню"}}: {{len .NavigationDiagnostics}}</p>
-{{range .NavigationDiagnostics}}{{if eq .Code "invalid-layer"}}<p>{{t $.Lang "Повреждённая общая настройка пропущена. Показано меню конфигурации; сохранение или сброс исправит этот слой."}}</p>{{else}}<p>{{t $.Lang "Конфигурация меню изменилась. Сохраните актуальную раскладку, чтобы убрать устаревшие правила."}}</p>{{end}}{{end}}
+{{range .NavigationDiagnostics}}{{if eq .Code "invalid-layer"}}<p>{{if $.NavigationPersonal}}{{if eq .Node "user"}}{{t $.Lang "Повреждённая личная настройка пропущена. Показано общее меню; сохранение или сброс исправит этот слой."}}{{else}}{{t $.Lang "Повреждённая общая настройка пропущена. Обратитесь к администратору базы."}}{{end}}{{else}}{{t $.Lang "Повреждённая общая настройка пропущена. Показано меню конфигурации; сохранение или сброс исправит этот слой."}}{{end}}</p>{{else}}<p>{{t $.Lang "Конфигурация меню изменилась. Сохраните актуальную раскладку, чтобы убрать устаревшие правила."}}</p>{{end}}{{end}}
 </div>{{end}}
 <div style="display:flex;gap:12px;flex-wrap:wrap;margin:16px 0">
-<form id="navigation-save" method="POST" action="/ui/admin/navigation/save">
+<form id="navigation-save" method="POST" action="{{.NavigationPath}}/save">
 <input type="hidden" name="subsystem" value="{{.NavigationSubsystem}}">
 <input type="hidden" name="revision" value="{{.NavigationRevision}}">
 <input id="navigation-desired" type="hidden" name="desired">
+{{if .NavigationPersonal}}<input type="hidden" name="base_revision" value="{{.NavigationBaseRevision}}"><input id="navigation-renamed" type="hidden" name="renamed" value="[]">{{end}}
 <button type="submit" class="btn btn-primary">{{t .Lang "Сохранить"}}</button>
 </form>
 <button id="navigation-add-section" type="button">{{t .Lang "Добавить раздел"}}</button>
 <button id="navigation-add-group" type="button">{{t .Lang "Добавить папку"}}</button>
-<form id="navigation-reset" method="POST" action="/ui/admin/navigation/reset" data-ob-confirm="{{t .Lang "Сбросить общую настройку к конфигурации?"}}">
+<form id="navigation-reset" method="POST" action="{{.NavigationPath}}/reset" data-ob-confirm="{{t .Lang .NavigationResetConfirm}}">
 <input type="hidden" name="subsystem" value="{{.NavigationSubsystem}}">
 <input type="hidden" name="revision" value="{{.NavigationRevision}}">
-<button type="submit">{{t .Lang "Сбросить к конфигурации"}}</button>
+<button type="submit">{{t .Lang .NavigationResetLabel}}</button>
 </form>
 </div>
 <div id="navigation-status" role="alert"></div><div id="navigation-live" aria-live="polite" style="min-height:1.5em"></div>

@@ -5,6 +5,7 @@ contents:
     - УчебныеГоды
     - ПериодыОбучения
     - Классы
+    - ClosedSentinel
   documents:
     - ПриказОНачалеУчебногоГода
   inforegs:
@@ -47,3 +48,11 @@ menu:
         - id: class-journal
           target: processor:КлассныйЖурнал
           title: Классный журнал
+    - id: closed-sentinel-section
+      title: SECRET_SECTION_SENTINEL
+      groups:
+        - id: closed-sentinel-group
+          title: SECRET_GROUP_SENTINEL
+          items:
+            - id: closed-sentinel-item
+              target: catalog:ClosedSentinel

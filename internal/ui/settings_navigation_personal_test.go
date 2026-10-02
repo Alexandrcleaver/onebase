@@ -1,0 +1,629 @@
+package ui
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/ivantit66/onebase/internal/auth"
+	"github.com/ivantit66/onebase/internal/backup"
+	"github.com/ivantit66/onebase/internal/dbtest"
+	"github.com/ivantit66/onebase/internal/dsl/interpreter"
+	"github.com/ivantit66/onebase/internal/i18n"
+	"github.com/ivantit66/onebase/internal/navigation"
+	"github.com/ivantit66/onebase/internal/project"
+	"github.com/ivantit66/onebase/internal/runtime"
+	"github.com/ivantit66/onebase/internal/storage"
+	"github.com/ivantit66/onebase/internal/websec"
+)
+
+const personalSchool = "ОбразовательнаяДеятельность"
+
+func schoolNavigationFixture(t *testing.T, db *storage.DB, dir string, seed bool) navigationHTTPFixture {
+	t.Helper()
+	ctx := context.Background()
+	proj, err := project.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(proj.Close)
+	for _, err := range []error{db.EnsureServiceSchema(ctx), db.Migrate(ctx, proj.Entities), db.MigrateInfoRegisters(ctx, proj.InfoRegisters), db.EnsureAuditSchema(ctx)} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg := runtime.NewRegistry()
+	reg.Load(runtime.LoadOptions{Entities: proj.Entities, Programs: proj.Programs, ManagerPrograms: proj.ManagerPrograms, Registers: proj.Registers, InfoRegs: proj.InfoRegisters, Constants: proj.Constants, Enums: proj.Enums, Reports: proj.Reports})
+	reg.LoadModules(proj.Modules)
+	reg.LoadProcessors(proj.Processors)
+	reg.LoadSubsystems(proj.Subsystems)
+	reg.LoadHomePage(proj.HomePage)
+	repo := auth.NewRepo(db)
+	if err := repo.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.EnsureRolesSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if seed {
+		roles, err := auth.LoadRolesYAML(filepath.Join(dir, "roles"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.SyncRoles(ctx, roles); err != nil {
+			t.Fatal(err)
+		}
+		for _, login := range []string{"admin", "alice", "bob"} {
+			user, err := repo.Create(ctx, login, "secret123", login, login == "admin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if login != "admin" {
+				if err := repo.AssignRole(ctx, user.ID, roles[0].ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	cookies := map[string]*http.Cookie{}
+	for _, login := range []string{"admin", "alice", "bob"} {
+		user, err := repo.GetByLogin(ctx, login)
+		if err != nil || user == nil {
+			t.Fatalf("user %s: %v", login, err)
+		}
+		token, err := repo.CreateSession(ctx, user.ID, auth.SessionMeta{Kind: auth.SessionKindEnterprise})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cookies[login] = &http.Cookie{Name: "onebase_session", Value: token}
+	}
+	bundle, err := i18n.Load(i18n.EmbeddedLocales, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(reg, db, interpreter.New(), repo, Config{Bundle: bundle, Lang: "ru"}, nil)
+	t.Cleanup(s.Close)
+	router := chi.NewRouter()
+	router.Use(websec.CSRFProtect)
+	s.MountStatic(router)
+	router.Group(func(group chi.Router) { group.Use(repo.Middleware); s.Mount(group) })
+	plain := chi.NewRouter()
+	plain.Use(websec.CSRFProtect)
+	s.Mount(plain)
+	return navigationHTTPFixture{s, router, plain, cookies}
+}
+
+func (f navigationHTTPFixture) personalEditor(t *testing.T, login, sub string) navigationBootstrap {
+	t.Helper()
+	return decodeNavigationBootstrap(t, f.request(t, "GET", "/ui/settings/navigation?"+url.Values{"subsystem": {sub}}.Encode(), login, nil))
+}
+
+func personalNavigationForm(t *testing.T, state navigationBootstrap) url.Values {
+	t.Helper()
+	form := navigationForm(t, state)
+	raw, err := json.Marshal(state.Renamed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	form.Set("base_revision", state.BaseRevision)
+	form.Set("renamed", string(raw))
+	return form
+}
+
+func personalSave(t *testing.T, f navigationHTTPFixture, login string, state navigationBootstrap) {
+	t.Helper()
+	if rec := f.request(t, "POST", "/ui/settings/navigation/save", login, personalNavigationForm(t, state)); rec.Code != http.StatusSeeOther {
+		t.Fatalf("save %s: %d %s", login, rec.Code, rec.Body.String())
+	}
+}
+
+func personalSection(t *testing.T, state *navigationBootstrap, id string) *navigation.Section {
+	t.Helper()
+	for i := range state.Desired.Sections {
+		if state.Desired.Sections[i].ID == id {
+			return &state.Desired.Sections[i]
+		}
+	}
+	t.Fatalf("missing section %s", id)
+	return nil
+}
+
+func TestPersonalNavigation_SchoolHTTPMatrix(t *testing.T) {
+	dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+		f := schoolNavigationFixture(t, db, "testdata/navigation-school", true)
+		common := f.editor(t, personalSchool)
+		personalSection(t, &common, "cfg:academic-years").Title = "Common years"
+		personalSection(t, &common, "cfg:academic-years").Titles = nil
+		commonSection := personalSection(t, &common, "cfg:academic-years")
+		commonSection.Groups = append(commonSection.Groups, navigation.Group{ID: "new:shared-empty", Title: "Shared empty folder"})
+		if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, common)); rec.Code != 303 {
+			t.Fatal(rec.Code, rec.Body.String())
+		}
+		alice := f.personalEditor(t, "alice", personalSchool)
+		shared := personalSection(t, &alice, "cfg:academic-years").Groups[3]
+		if !strings.HasPrefix(shared.ID, "adm:") || alice.Origins[shared.ID] != "common" {
+			t.Fatal("inherited empty administrator folder missing")
+		}
+		if alice.Origins["cfg:academic-years"] != "common" {
+			t.Fatal("common provenance lost")
+		}
+		section := personalSection(t, &alice, "cfg:academic-years")
+		item := section.Groups[0].Items[0]
+		section.Groups[0].Items = nil
+		section.Groups = append(section.Groups, navigation.Group{ID: "new:alice", Title: "Alice folder", Items: []navigation.Item{item}})
+		section.Title, section.Titles = "Alice years", nil
+		alice.Renamed = []string{section.ID}
+		preview := f.request(t, "POST", "/ui/settings/navigation/preview", "alice", personalNavigationForm(t, alice))
+		if preview.Code != 200 || !strings.Contains(preview.Body.String(), "Alice folder") {
+			t.Fatal(preview.Code, preview.Body.String())
+		}
+		if f.personalEditor(t, "alice", personalSchool).Revision != "" {
+			t.Fatal("preview wrote state")
+		}
+		personalSave(t, f, "alice", alice)
+		saved := f.personalEditor(t, "alice", personalSchool)
+		savedSection := personalSection(t, &saved, "cfg:academic-years")
+		folder := savedSection.Groups[len(savedSection.Groups)-1]
+		if !strings.HasPrefix(folder.ID, "usr:") || folder.Items[0].ID != item.ID {
+			t.Fatal("personal identity/move lost")
+		}
+		bob := f.personalEditor(t, "bob", personalSchool)
+		if personalSection(t, &bob, "cfg:academic-years").Title != "Common years" || strings.Contains(f.request(t, "GET", "/ui/?subsystem="+url.QueryEscape(personalSchool), "bob", nil).Body.String(), "Alice folder") {
+			t.Fatal("account isolation lost")
+		}
+		personalSection(t, &bob, "cfg:academic-years").Title = "Bob years"
+		bob.Renamed = []string{"cfg:academic-years"}
+		personalSave(t, f, "bob", bob)
+		// Personal settings must not affect either administrator or global context.
+		if f.editor(t, personalSchool).Desired.Sections[0].Title != "Common years" || f.personalEditor(t, "alice", "").Revision != "" {
+			t.Fatal("layer/context isolation lost")
+		}
+		page := f.request(t, "GET", "/ui/?subsystem="+url.QueryEscape(personalSchool), "alice", nil)
+		if !strings.Contains(page.Body.String(), "Alice folder") || !strings.Contains(page.Body.String(), "/ui/settings/navigation?") {
+			t.Fatal("runtime or fixed entry missing")
+		}
+		// Reset only Alice: Bob and common remain unchanged.
+		if rec := f.request(t, "POST", "/ui/settings/navigation/reset", "alice", url.Values{"subsystem": {personalSchool}, "revision": {saved.Revision}}); rec.Code != 303 {
+			t.Fatal(rec.Code)
+		}
+		reset := f.personalEditor(t, "alice", personalSchool)
+		if reset.Revision != "" || personalSection(t, &reset, "cfg:academic-years").Title != "Common years" {
+			t.Fatal("personal reset did not inherit common")
+		}
+		bob = f.personalEditor(t, "bob", personalSchool)
+		if personalSection(t, &bob, "cfg:academic-years").Title != "Bob years" {
+			t.Fatal("reset altered Bob")
+		}
+		common = f.editor(t, personalSchool)
+		if rec := f.request(t, "POST", "/ui/admin/navigation/reset", "admin", url.Values{"subsystem": {personalSchool}, "revision": {common.Revision}}); rec.Code != 303 {
+			t.Fatal(rec.Code)
+		}
+		reset = f.personalEditor(t, "alice", personalSchool)
+		if personalSection(t, &reset, "cfg:academic-years").Title != "Учебные годы" {
+			t.Fatal("admin reset did not inherit YAML")
+		}
+		bob = f.personalEditor(t, "bob", personalSchool)
+		if personalSection(t, &bob, "cfg:academic-years").Title != "Bob years" {
+			t.Fatal("admin reset erased personal override")
+		}
+		entries, err := db.AuditSearch(context.Background(), storage.AuditFilter{EntityName: "subsystem:" + personalSchool}, 100, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := 0
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Action, "navigation.user.") {
+				found++
+				raw, _ := json.Marshal(entry)
+				if entry.UserID == "" || entry.UserLogin == "" || strings.Contains(string(raw), "Alice years") || strings.Contains(string(raw), "cfg:") {
+					t.Fatal("unsafe audit", string(raw))
+				}
+			}
+		}
+		if found != 3 {
+			t.Fatal("personal audit count", found)
+		}
+	})
+}
+
+func TestPersonalNavigation_PrivacyForgedTargetsAndConflictMatrix(t *testing.T) {
+	dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+		f := schoolNavigationFixture(t, db, "testdata/navigation-school", true)
+		checkPrivate := func(body string) {
+			t.Helper()
+			for _, denied := range []string{"ClosedSentinel", "SECRET_", "closed-sentinel"} {
+				if strings.Contains(body, denied) {
+					t.Fatal("private metadata in response", denied)
+				}
+			}
+		}
+		rec := f.request(t, "GET", "/ui/settings/navigation?subsystem="+url.QueryEscape(personalSchool), "alice", nil)
+		checkPrivate(rec.Body.String())
+		alice := decodeNavigationBootstrap(t, rec)
+		admin := f.editor(t, personalSchool)
+		// Closed metadata or an admin-hidden item cannot be reintroduced by ID.
+		for _, forbidden := range []navigation.Section{*personalSection(t, &admin, "cfg:closed-sentinel-section")} {
+			forged := f.personalEditor(t, "alice", personalSchool)
+			forged.Desired.Sections = append(forged.Desired.Sections, forbidden)
+			if got := f.request(t, "POST", "/ui/settings/navigation/save", "alice", personalNavigationForm(t, forged)); got.Code != 400 {
+				t.Fatal("forged private tree", got.Code)
+			}
+		}
+		for _, key := range []string{"login", "key", "layer", "ops"} {
+			form := personalNavigationForm(t, alice)
+			form.Set(key, "admin")
+			if got := f.request(t, "POST", "/ui/settings/navigation/save", "alice", form); got.Code != 400 {
+				t.Fatal("forged scope", key, got.Code)
+			}
+		}
+		for _, action := range []string{"save", "preview", "reset"} {
+			form := personalNavigationForm(t, alice)
+			if action == "reset" {
+				form = url.Values{"revision": {alice.Revision}}
+			}
+			form.Set("subsystem", "ClosedOnly")
+			if got := f.request(t, "POST", "/ui/settings/navigation/"+action+"?subsystem="+url.QueryEscape(personalSchool), "alice", form); got.Code != 403 {
+				t.Fatal("POST body subsystem gate", action, got.Code)
+			}
+		}
+		if got := f.request(t, "GET", "/ui/settings/navigation?subsystem=ClosedOnly", "alice", nil); got.Code != 403 {
+			t.Fatal("GET subsystem gate", got.Code)
+		}
+		// Hide bells in common, then try to paste the earlier personal bootstrap.
+		personalSection(t, &admin, "cfg:academic-years").Groups[1].Items = personalSection(t, &admin, "cfg:academic-years").Groups[1].Items[1:]
+		if got := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, admin)); got.Code != 303 {
+			t.Fatal(got.Code)
+		}
+		if got := f.request(t, "POST", "/ui/settings/navigation/save", "alice", personalNavigationForm(t, alice)); got.Code != 409 {
+			t.Fatal("stale common base", got.Code)
+		}
+		current := f.personalEditor(t, "alice", personalSchool)
+		forged := current
+		forged.Desired = alice.Desired
+		if got := f.request(t, "POST", "/ui/settings/navigation/save", "alice", personalNavigationForm(t, forged)); got.Code != 400 {
+			t.Fatal("admin-hidden restoration", got.Code)
+		}
+		if _, present := navigationEditorNodes(current.Base)["cfg:bells"]; present {
+			t.Fatal("hidden item in palette")
+		}
+		if got := f.request(t, "GET", "/ui/inforeg/"+url.PathEscape(strings.ToLower("РасписаниеЗвонков")), "alice", nil); got.Code != 200 {
+			t.Fatal("menu hiding changed ACL", got.Code)
+		}
+		first := current
+		// Desired slices are aliased; reload the stale tab independently.
+		second := f.personalEditor(t, "alice", personalSchool)
+		personalSection(t, &first, "cfg:academic-years").Title = "Winner"
+		first.Renamed = []string{"cfg:academic-years"}
+		personalSave(t, f, "alice", first)
+		personalSection(t, &second, "cfg:academic-years").Title = "Loser"
+		second.Renamed = []string{"cfg:academic-years"}
+		conflict := f.request(t, "POST", "/ui/settings/navigation/save", "alice", personalNavigationForm(t, second))
+		if conflict.Code != 409 {
+			t.Fatal("stale own CAS", conflict.Code)
+		}
+		winner := decodeNavigationBootstrap(t, conflict)
+		if personalSection(t, &winner, "cfg:academic-years").Title != "Winner" {
+			t.Fatal("winner lost")
+		}
+		checkPrivate(conflict.Body.String())
+		if got := f.request(t, "POST", "/ui/settings/navigation/reset", "alice", url.Values{"subsystem": {personalSchool}, "revision": {second.Revision}}); got.Code != 409 {
+			t.Fatal("reset CAS", got.Code)
+		}
+	})
+}
+
+func TestPersonalNavigation_ExplicitNeutralRenamesAndRoleChangesMatrix(t *testing.T) {
+	dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+		f := schoolNavigationFixture(t, db, "testdata/navigation-school", true)
+		admin := f.editor(t, personalSchool)
+		section := personalSection(t, &admin, "cfg:academic-years")
+		section.Title, section.Titles = "Common", nil
+		section.Groups[0].Title = "Common group"
+		section.Groups[0].Items[0].Title = "Common item"
+		if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, admin)); rec.Code != 303 {
+			t.Fatal(rec.Code)
+		}
+		alice := f.personalEditor(t, "alice", personalSchool)
+		alice.Renamed = []string{"cfg:academic-years", "cfg:periods", "cfg:periods-list"}
+		personal := personalSection(t, &alice, "cfg:academic-years")
+		privateItem := personal.Groups[0].Items[0]
+		personal.Groups[0].Items = nil
+		personal.Groups = append(personal.Groups, navigation.Group{ID: "new:retained-private", Title: "My private placement", Items: []navigation.Item{privateItem}})
+		personalSave(t, f, "alice", alice) // Explicit away/back-to-same text, no tree difference.
+		alice = f.personalEditor(t, "alice", personalSchool)
+		personalSection(t, &alice, "cfg:academic-years").Icon = "book-open"
+		personalSave(t, f, "alice", alice) // Neutral intent survives unrelated resave.
+		// Revoke Alice's period permission without restarting or changing Bob.
+		teacher, err := auth.LoadRoleFile("testdata/navigation-school/roles/Teacher.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		limited := *teacher
+		limited.Name = "LimitedTeacher"
+		limited.Permissions.Catalogs = map[string][]string{"УчебныеГоды": {"read"}, "Классы": {"read"}}
+		if err := f.server.authRepo.SyncRoles(context.Background(), []*auth.Role{&limited}); err != nil {
+			t.Fatal(err)
+		}
+		roles, err := f.server.authRepo.ListRoles(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var teacherID string
+		for _, role := range roles {
+			if role.Name == "Teacher" {
+				teacherID = role.ID
+			}
+		}
+		user, err := f.server.authRepo.GetByLogin(context.Background(), "alice")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.server.authRepo.AssignRole(context.Background(), user.ID, limited.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.server.authRepo.UnassignRole(context.Background(), user.ID, teacherID); err != nil {
+			t.Fatal(err)
+		}
+		limitedState := f.personalEditor(t, "alice", personalSchool)
+		if _, visible := navigationEditorNodes(limitedState.Desired)["cfg:periods-list"]; visible {
+			t.Fatal("revoked item in editor")
+		}
+		if rec := f.request(t, "GET", "/ui/catalog/"+url.PathEscape(strings.ToLower("ПериодыОбучения")), "alice", nil); rec.Code != 403 {
+			t.Fatal("revoked direct URL", rec.Code)
+		}
+		personalSection(t, &limitedState, "cfg:academic-years").Icon = "calendar-days"
+		personalSave(t, f, "alice", limitedState)
+		admin = f.editor(t, personalSchool)
+		section = personalSection(t, &admin, "cfg:academic-years")
+		section.Title = "New common"
+		section.Groups[0].Title = "New group"
+		section.Groups[0].Items[0].Title = "New item"
+		if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, admin)); rec.Code != 303 {
+			t.Fatal(rec.Code)
+		}
+		if err := f.server.authRepo.AssignRole(context.Background(), user.ID, teacherID); err != nil {
+			t.Fatal(err)
+		}
+		alice = f.personalEditor(t, "alice", personalSchool)
+		section = personalSection(t, &alice, "cfg:academic-years")
+		if section.Title != "Common" || section.Groups[0].Title != "Common group" || section.Groups[len(section.Groups)-1].Items[0].Title != "Common item" {
+			t.Fatal("explicit/private intent lost", section)
+		}
+		bob := f.personalEditor(t, "bob", personalSchool)
+		if personalSection(t, &bob, "cfg:academic-years").Title != "New common" {
+			t.Fatal("Bob did not inherit common change")
+		}
+	})
+}
+
+func TestPersonalNavigation_AuthCSRFMalformedAndCorruptMatrix(t *testing.T) {
+	dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+		f := schoolNavigationFixture(t, db, "testdata/navigation-school", true)
+		state := f.personalEditor(t, "alice", personalSchool)
+		for _, action := range []string{"", "/preview", "/save", "/reset"} {
+			method := "POST"
+			if action == "" {
+				method = "GET"
+			}
+			req := httptest.NewRequest(method, "/ui/settings/navigation"+action, strings.NewReader(personalNavigationForm(t, state).Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			f.plain.ServeHTTP(rec, req)
+			if rec.Code != 403 {
+				t.Fatal("anonymous handler", action, rec.Code)
+			}
+			req = httptest.NewRequest(method, "/ui/settings/navigation"+action, strings.NewReader(personalNavigationForm(t, state).Encode()))
+			req.AddCookie(f.cookie["alice"])
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Origin", "https://evil.example")
+			rec = httptest.NewRecorder()
+			f.http.ServeHTTP(rec, req)
+			if method == "POST" && rec.Code != 403 {
+				t.Fatal("CSRF", action, rec.Code)
+			}
+		}
+		for _, mutate := range []func(url.Values){
+			func(form url.Values) { form.Set("renamed", `["cfg:closed-sentinel-item"]`) },
+			func(form url.Values) { form.Set("renamed", `["cfg:academic-years","cfg:academic-years"]`) },
+			func(form url.Values) { form.Set("renamed", `[] {}`) },
+			func(form url.Values) { form.Set("desired", form.Get("desired")+` {}`) },
+			func(form url.Values) { form["revision"] = []string{"", ""} },
+			func(form url.Values) { form.Del("base_revision") },
+		} {
+			form := personalNavigationForm(t, state)
+			mutate(form)
+			if rec := f.request(t, "POST", "/ui/settings/navigation/save", "alice", form); rec.Code != 400 {
+				t.Fatal("malformed", rec.Code)
+			}
+		}
+		section := personalSection(t, &state, "cfg:academic-years")
+		section.Title, section.Titles = `</script><img src=x onerror=alert(1)>`, nil
+		state.Renamed = []string{section.ID}
+		personalSave(t, f, "alice", state)
+		page := f.request(t, "GET", "/ui/settings/navigation?subsystem="+url.QueryEscape(personalSchool), "alice", nil)
+		if strings.Contains(page.Body.String(), `</script><img`) || strings.Contains(page.Body.String(), `<img src=x`) {
+			t.Fatal("unescaped personal HTML")
+		}
+		state = decodeNavigationBootstrap(t, page)
+		if personalSection(t, &state, "cfg:academic-years").Title != section.Title {
+			t.Fatal("literal title lost")
+		}
+		key := storage.NavigationUserPrefix + "5:alice." + strconv.Itoa(len("subsystem:"+personalSchool)) + ":subsystem:" + personalSchool
+		if err := db.SaveSetting(context.Background(), key, "{ broken SECRET_CLOSED_RULE }"); err != nil {
+			t.Fatal(err)
+		}
+		page = f.request(t, "GET", "/ui/settings/navigation?subsystem="+url.QueryEscape(personalSchool), "alice", nil)
+		if page.Code != 200 || strings.Contains(page.Body.String(), "SECRET_") || !strings.Contains(page.Body.String(), "Повреждённая личная настройка") {
+			t.Fatal("unsafe corrupt fallback")
+		}
+		state = decodeNavigationBootstrap(t, page)
+		if state.Revision == "" || personalSection(t, &state, "cfg:academic-years").Title != "Учебные годы" {
+			t.Fatal("corrupt user did not fall back")
+		}
+		if rec := f.request(t, "POST", "/ui/settings/navigation/reset", "alice", url.Values{"subsystem": {personalSchool}, "revision": {state.Revision}}); rec.Code != 303 {
+			t.Fatal("corrupt reset", rec.Code)
+		}
+	})
+}
+
+func TestPersonalNavigation_RestartAndBackupRestore(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "restart.sqlite")
+	db, err := storage.ConnectSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := schoolNavigationFixture(t, db, "testdata/navigation-school", true)
+	admin := f.editor(t, personalSchool)
+	personalSection(t, &admin, "cfg:academic-years").Title = "Restart common"
+	personalSection(t, &admin, "cfg:academic-years").Titles = nil
+	if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, admin)); rec.Code != 303 {
+		t.Fatal(rec.Code)
+	}
+	for _, login := range []string{"alice", "bob"} {
+		state := f.personalEditor(t, login, personalSchool)
+		personalSection(t, &state, "cfg:academic-years").Title = login + " persisted"
+		state.Renamed = []string{"cfg:academic-years"}
+		personalSave(t, f, login, state)
+	}
+	f.server.Close()
+	db.Close()
+	db, err = storage.ConnectSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	f = schoolNavigationFixture(t, db, "testdata/navigation-school", false)
+	assertRestored := func(f navigationHTTPFixture) {
+		t.Helper()
+		if f.editor(t, personalSchool).Desired.Sections[0].Title != "Restart common" {
+			t.Fatal("common lost")
+		}
+		for _, login := range []string{"alice", "bob"} {
+			state := f.personalEditor(t, login, personalSchool)
+			if personalSection(t, &state, "cfg:academic-years").Title != login+" persisted" {
+				t.Fatal("personal lost", login)
+			}
+			page := f.request(t, "GET", "/ui/?subsystem="+url.QueryEscape(personalSchool), login, nil)
+			if page.Code != 200 || !strings.Contains(page.Body.String(), login+" persisted") || strings.Contains(page.Body.String(), "SECRET_") {
+				t.Fatal("restored runtime or rights lost")
+			}
+		}
+	}
+	assertRestored(f)
+	var archive bytes.Buffer
+	if err := backup.ExportUniversal(ctx, db, "file", "testdata/navigation-school", "", "School", &archive); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []backup.ExchangeRestoreMode{backup.ExchangeRestoreClone, backup.ExchangeRestoreDisasterRecovery} {
+		t.Run(string(mode), func(t *testing.T) {
+			target, err := storage.ConnectSQLite(ctx, filepath.Join(t.TempDir(), "restored.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(target.Close)
+			if err := target.EnsureServiceSchema(ctx); err != nil {
+				t.Fatal(err)
+			}
+			configDir := filepath.Join(t.TempDir(), "School")
+			if _, err := backup.ImportUniversalWithOptions(ctx, target, "file", configDir, "", bytes.NewReader(archive.Bytes()), int64(archive.Len()), backup.ImportOptions{ExchangeMode: mode}); err != nil {
+				t.Fatal(err)
+			}
+			// Fresh sessions against restored accounts/roles, not exported cookies.
+			assertRestored(schoolNavigationFixture(t, target, configDir, false))
+		})
+	}
+}
+
+func TestPersonalNavigation_ConfigurationEvolution(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS("testdata/navigation-school")); err != nil {
+		t.Fatal(err)
+	}
+	db, err := storage.ConnectSQLite(ctx, filepath.Join(t.TempDir(), "evolution.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	f := schoolNavigationFixture(t, db, dir, true)
+	state := f.personalEditor(t, "alice", personalSchool)
+	section := personalSection(t, &state, "cfg:academic-years")
+	period := section.Groups[0].Items[0]
+	section.Groups[0].Items = nil
+	section.Groups = append(section.Groups, navigation.Group{ID: "new:mixed", Title: "My mixed folder", Items: []navigation.Item{period, section.Groups[2].Items[0]}})
+	section.Groups[2].Items = nil
+	personalSave(t, f, "alice", state)
+	f.server.Close()
+	// Reload actual YAML: the explicit ID remains stable despite a title change;
+	// one old target disappears and a new unplaced contents member is inherited.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := root.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	path := filepath.Join("subsystems", personalSchool+".yaml")
+	raw, err := root.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := strings.Replace(strings.ReplaceAll(string(raw), "\r\n", "\n"), "title: Учебные годы", "title: Changed YAML title", 1)
+	updated = strings.Replace(updated, "    - Классы", "    - Классы\n    - NewCourse", 1)
+	updated = strings.ReplaceAll(updated, "    - ПриказОНачалеУчебногоГода\n", "")
+	updated = strings.ReplaceAll(updated, "        - id: orders\n          title: Приказы по учебному году\n          items:\n            - id: opening-order\n              target: document:ПриказОНачалеУчебногоГода\n", "")
+	if err := root.WriteFile(path, []byte(updated), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "catalogs", "NewCourse.yaml"), []byte("name: NewCourse\ntitle: New course\nfields:\n  - name: Name\n    type: string\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "documents", "ПриказОНачалеУчебногоГода.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	teacher, err := auth.LoadRoleFile(filepath.Join(dir, "roles", "Teacher.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	teacher.Permissions.Catalogs["NewCourse"] = []string{"read"}
+	if err := f.server.authRepo.SyncRoles(ctx, []*auth.Role{teacher}); err != nil {
+		t.Fatal(err)
+	}
+	f = schoolNavigationFixture(t, db, dir, false)
+	state = f.personalEditor(t, "alice", personalSchool)
+	section = personalSection(t, &state, "cfg:academic-years")
+	if section.Title != "Changed YAML title" {
+		t.Fatal("title change reset inherited identity")
+	}
+	if _, present := navigationEditorNodes(state.Desired)["cfg:opening-order"]; present {
+		t.Fatal("removed target restored")
+	}
+	found := false
+	for _, section := range state.Desired.Sections {
+		for _, item := range section.Items {
+			if item.Object.Target.Name == "NewCourse" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("new unplaced contents not inherited")
+	}
+	personalSave(t, f, "alice", state)
+	setting, err := db.GetNavigationSettings(ctx, storage.NavigationSettingsScope{Layer: navigation.UserLayer, Login: "alice", Context: "subsystem:" + personalSchool})
+	if err != nil || strings.Contains(setting.Raw, "opening-order") {
+		t.Fatal("explicit resave did not drop stale op", err)
+	}
+}

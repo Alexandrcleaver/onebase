@@ -718,6 +718,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, dat
 			data["CanDelete"] = s.can(r, "inforeg", ir.Name, "delete")
 		}
 	}
+	data["HasPersonalNavigation"] = s.store != nil && currentUserLogin(r) != ""
 	if _, ok := data["HasAuth"]; !ok {
 		u := auth.UserFromContext(r.Context())
 		data["HasAuth"] = s.authRepo != nil && u != nil
