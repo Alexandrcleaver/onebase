@@ -53,8 +53,10 @@ func TestDebugAndOneTimeCodeRejectClientBaseWithoutCreatingDatabase(t *testing.T
 	}
 	h := &handler{store: store, runner: NewRunner()}
 
-	// Каталог, куда legacy-ветка кладёт базу по пустым полям записи.
-	tempBefore := countFiles(t, os.TempDir())
+	// Путь, который legacy-ветка выдумывает по пустым полям записи. Считать файлы
+	// во всём os.TempDir() нельзя: каталог общий для машины, и на CI в нём есть
+	// подкаталоги без доступа (/tmp/snap-private-tmp на ubuntu-runner) — обход
+	// падал бы на permission denied. Проверяем конкретный файл.
 	legacyDB := filepath.Join(os.TempDir(), "onebase_"+base.ID+".db")
 	if err := os.Remove(legacyDB); err != nil && !os.IsNotExist(err) {
 		t.Fatalf("подготовка: %v", err)
@@ -94,11 +96,6 @@ func TestDebugAndOneTimeCodeRejectClientBaseWithoutCreatingDatabase(t *testing.T
 	}
 	if got := countFiles(t, dir); got != regBefore {
 		t.Errorf("в каталоге реестра появились файлы: было %d, стало %d", regBefore, got)
-	}
-	if got := countFiles(t, os.TempDir()); got > tempBefore {
-		// Временный каталог общий для машины, поэтому проверка мягкая: точный
-		// файл базы проверен выше, здесь — что мы не насыпали лишнего сами.
-		t.Logf("файлов в temp стало больше (%d → %d) — проверьте посторонние процессы", tempBefore, got)
 	}
 }
 
