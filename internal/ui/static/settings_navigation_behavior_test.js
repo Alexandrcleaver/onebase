@@ -81,6 +81,7 @@ test('new containers are temporary; title edit clears inherited translations wit
   const title = ui.elements['navigation-properties'].children[0].children[0];
   title.value = 'Study'; title.focus(); title.fire('input');
   assert.equal(ui.state().sections[0].titles, undefined);
+  assert.equal(ui.state().sections[0].title_explicit, true);
   assert.equal(title.focused, true);
   assert.equal(ui.elements['navigation-properties'].children[0].children[0], title);
   ui.elements['navigation-add-group'].click();

@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/ivantit66/onebase/internal/auth"
+	"github.com/ivantit66/onebase/internal/i18n"
 	"github.com/ivantit66/onebase/internal/metadata"
 	"github.com/ivantit66/onebase/internal/navigation"
 	"github.com/ivantit66/onebase/internal/storage"
@@ -418,4 +419,97 @@ func TestNavigationSettings_GlobalAndSubsystemIsolationXSSAndFreshConfiguration(
 	if strings.Contains(restricted.Body.String(), "href=\"/ui/catalog/Classes") || strings.Contains(restricted.Body.String(), "href=\"/ui/catalog/Years") {
 		t.Fatal("saved layout bypassed changed permissions")
 	}
+}
+
+// Exercise the mounted editor and runtime with sessions, CSRF and persisted
+// SQLite settings. Returning to the configuration text is still an explicit
+// rename, not a request to inherit the legacy heading's UI translation.
+func TestNavigationSettings_LegacyExplicitTitleBackToConfiguration(t *testing.T) {
+	f := newNavigationHTTPFixture(t)
+	f.server.reg.GetSubsystem("School").Menu = nil
+	bundle, err := i18n.Load(i18n.EmbeddedLocales, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.server.cfg.Bundle, f.server.cfg.Lang = bundle, "en"
+	const id = "cfg:legacy-catalog"
+	heading := func(login, want string) {
+		t.Helper()
+		rec := f.request(t, "GET", "/ui/?subsystem=School", login, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("runtime: %d %s", rec.Code, rec.Body.String())
+		}
+		doc, err := html.Parse(strings.NewReader(rec.Body.String()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		node := semanticFind(doc, "data-nav-id", id)
+		if node == nil {
+			t.Fatal("legacy catalog section missing")
+		}
+		if got := semanticHeading(node); got != want {
+			t.Fatalf("%s heading = %q, want %q", login, got, want)
+		}
+	}
+	heading("admin", "Catalogs")
+	original := ""
+	for _, section := range f.editor(t, "School").Base.Sections {
+		if section.ID == id {
+			original = section.Title
+		}
+	}
+	if original != "Справочники" {
+		t.Fatalf("unexpected configuration title: %q", original)
+	}
+	for _, title := range []string{"Temporary explicit title", original} {
+		state := f.editor(t, "School")
+		for i := range state.Desired.Sections {
+			if state.Desired.Sections[i].ID == id {
+				state.Desired.Sections[i].Title = title
+				state.Desired.Sections[i].Titles = nil
+			}
+		}
+		rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, state))
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("save %q: %d %s", title, rec.Code, rec.Body.String())
+		}
+		heading("admin", title)
+		heading("alice", title)
+	}
+	for _, lang := range bundle.Available() {
+		f.server.cfg.Lang = lang.Code
+		heading("admin", original)
+		heading("alice", original)
+		saved := f.editor(t, "School")
+		for _, section := range saved.Preview {
+			if section.ID == id && section.Title != original {
+				t.Fatalf("%s preview heading = %q", lang.Code, section.Title)
+			}
+		}
+	}
+	// An unrelated edit and save must retain the explicit title's provenance.
+	f.server.cfg.Lang = "en"
+	saved := f.editor(t, "School")
+	saved.Desired.Sections[0].Icon = "book-open"
+	if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, saved)); rec.Code != http.StatusSeeOther {
+		t.Fatalf("resave: %d %s", rec.Code, rec.Body.String())
+	}
+	heading("alice", original)
+	saved = f.editor(t, "School")
+	if rec := f.request(t, "POST", "/ui/admin/navigation/reset", "admin", url.Values{"subsystem": {"School"}, "revision": {saved.Revision}}); rec.Code != http.StatusSeeOther {
+		t.Fatalf("reset: %d %s", rec.Code, rec.Body.String())
+	}
+	heading("alice", "Catalogs")
+	// Editing the title directly to the same text also counts as a rename; the
+	// browser sends title_explicit even without an intermediate different title.
+	saved = f.editor(t, "School")
+	for i := range saved.Desired.Sections {
+		if saved.Desired.Sections[i].ID == id {
+			saved.Desired.Sections[i].TitleExplicit = true
+		}
+	}
+	if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, saved)); rec.Code != http.StatusSeeOther {
+		t.Fatalf("direct same-title save: %d %s", rec.Code, rec.Body.String())
+	}
+	heading("alice", original)
 }

@@ -31,6 +31,7 @@ func TestDeltaDiffExplicitRenameToBaseTitleClearsTranslations(t *testing.T) {
 	base := deltaTree(t)
 	desired := deltaClone(t, base)
 	desired.Sections[0].Titles = nil
+	desired.Sections[0].TitleExplicit = true
 	delta, err := navigation.Diff(base, desired, navigation.AdminLayer)
 	if err != nil {
 		t.Fatal(err)
@@ -185,6 +186,7 @@ func TestDeltaDiffMinimalSchoolEdits(t *testing.T) {
 	}
 	want := deltaClone(t, base)
 	want.Sections[0].Title, want.Sections[0].Titles = "Common study", nil
+	want.Sections[0].TitleExplicit = true
 	want.Sections[0].Groups = append(want.Sections[0].Groups, navigation.Group{ID: custom, Title: "Control", Icon: "clipboard-check", Items: []navigation.Item{want.Sections[1].Items[0]}})
 	want.Sections[1].Items = nil
 	want.Sections[0].Groups[0].Items = []navigation.Item{want.Sections[0].Groups[0].Items[1]}

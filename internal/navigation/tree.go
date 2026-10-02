@@ -82,12 +82,15 @@ type Tree struct {
 }
 
 type Section struct {
-	ID     string            `json:"id"`
-	Title  string            `json:"title"`
-	Titles map[string]string `json:"titles,omitempty"`
-	Icon   string            `json:"icon,omitempty"`
-	Items  []Item            `json:"items,omitempty"`
-	Groups []Group           `json:"groups,omitempty"`
+	// TitleExplicit preserves a rename even when it matches the configuration
+	// text. Legacy sections otherwise translate that text through the UI bundle.
+	TitleExplicit bool              `json:"title_explicit,omitempty"`
+	ID            string            `json:"id"`
+	Title         string            `json:"title"`
+	Titles        map[string]string `json:"titles,omitempty"`
+	Icon          string            `json:"icon,omitempty"`
+	Items         []Item            `json:"items,omitempty"`
+	Groups        []Group           `json:"groups,omitempty"`
 }
 
 type Group struct {

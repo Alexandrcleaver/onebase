@@ -196,7 +196,7 @@ func (s *Server) navigationGroups(r *http.Request, tree, base navigation.Tree, c
 		group := navGroup{ID: section.ID, DOMID: navDOMID(context, section.ID), Icon: section.Icon,
 			Kind: navigation.DisplayTitle(section.Title, section.Titles, lang), Items: items(section.Items), Open: semantic}
 		original, existed := originals[section.ID]
-		if !configured && existed && section.Title == original.Title && maps.Equal(section.Titles, original.Titles) {
+		if !configured && existed && !section.TitleExplicit && section.Title == original.Title && maps.Equal(section.Titles, original.Titles) {
 			group.Kind = translate(section.Title)
 			if section.ID == "cfg:legacy-system" {
 				group.Kind = section.Title // exact legacy heading, including other UI languages

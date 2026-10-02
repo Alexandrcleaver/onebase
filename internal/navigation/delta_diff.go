@@ -111,7 +111,7 @@ func Diff(base, desired Tree, layer Layer) (Delta, error) {
 	sort.Strings(ids)
 	for _, id := range ids {
 		w, old := wanted.nodes[id], work.nodes[id]
-		if w.title != old.title || !maps.Equal(w.titles, old.titles) {
+		if w.title != old.title || !maps.Equal(w.titles, old.titles) || w.titleExplicit && !old.titleExplicit {
 			title := w.title
 			delta.Ops = append(delta.Ops, Operation{Op: "rename", Node: id, Title: &title})
 		}
