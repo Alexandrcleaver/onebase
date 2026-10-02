@@ -195,6 +195,100 @@ func navigationEditorNodes(tree navigation.Tree) map[string]string {
 	return result
 }
 
+type navigationEditorLocation struct {
+	parent string
+	kind   string
+}
+
+func navigationEditorLocations(tree navigation.Tree) (map[string]navigationEditorLocation, map[navigationEditorLocation][]string) {
+	nodes := map[string]navigationEditorLocation{}
+	siblings := map[navigationEditorLocation][]string{}
+	add := func(id, parent, kind string) {
+		location := navigationEditorLocation{parent, kind}
+		nodes[id] = location
+		siblings[location] = append(siblings[location], id)
+	}
+	for _, section := range tree.Sections {
+		add(section.ID, "", "section")
+		for _, item := range section.Items {
+			add(item.ID, section.ID, "item")
+		}
+		for _, group := range section.Groups {
+			add(group.ID, section.ID, "group")
+			for _, item := range group.Items {
+				add(item.ID, group.ID, "item")
+			}
+		}
+	}
+	return nodes, siblings
+}
+
+// Track structural dependencies without applying visibility early: ApplyDelta
+// defers hide until all moves, so a private child can still leave a hidden parent.
+func navigationEditorTrackLocation(nodes map[string]navigationEditorLocation, op navigation.Operation) {
+	id, location := op.Node, nodes[op.Node]
+	switch op.Op {
+	case "add_section", "add_group":
+		id, location.kind = op.ID, strings.TrimPrefix(op.Op, "add_")
+	case "move":
+		if location.kind == "" {
+			return
+		}
+	case "remove_custom":
+		removed := map[string]bool{op.Node: true}
+		for changed := true; changed; {
+			changed = false
+			for id, current := range nodes {
+				if removed[id] || removed[current.parent] {
+					removed[id] = true
+					delete(nodes, id)
+					changed = true
+				}
+			}
+		}
+		return
+	default:
+		return
+	}
+	parent, present := nodes[op.Parent]
+	validParent := location.kind == "section" && op.Parent == "" || present && (location.kind == "group" && parent.kind == "section" || location.kind == "item" && (parent.kind == "section" || parent.kind == "group"))
+	location.parent = op.Parent
+	if validParent && (op.After == "" || op.After != id && nodes[op.After] == location) {
+		nodes[id] = location
+	}
+}
+
+// Keep a closed node's destination even when its old visible predecessor moved
+// away. The nearest surviving old sibling, or the front, is a valid fallback.
+func personalNavigationAfter(op navigation.Operation, nodes map[string]navigationEditorLocation, previous map[navigationEditorLocation][]string) navigation.Operation {
+	if op.Op != "move" || op.After == "" {
+		return op
+	}
+	location, present := nodes[op.Node]
+	if !present {
+		return op
+	}
+	location.parent = op.Parent
+	if nodes[op.After] == location {
+		return op
+	}
+	op.After = ""
+	siblings := previous[location]
+	for i, id := range siblings {
+		if id != op.Node {
+			continue
+		}
+		for j := i - 1; j >= 0; j-- {
+			if nodes[siblings[j]] == location {
+				op.After = siblings[j]
+				break
+			}
+		}
+		break
+	}
+	return op
+}
+
 // Replace editable intent while preserving valid previous intent for nodes
 // currently outside RBAC. Re-diffing the full result removes stale references
 // without turning the permitted projection into a persisted full snapshot.
@@ -213,10 +307,11 @@ func personalNavigationDelta(state navigationEditorState, input navigationEditor
 	}
 	hash, _ := state.layerBase.Hash()
 	combined := navigation.Delta{Version: 1, BaseHash: hash, Ops: []navigation.Operation{}}
+	locations, _ := navigationEditorLocations(state.layerBase)
+	_, previousSiblings := navigationEditorLocations(state.effective)
 	for _, op := range visible.Ops {
-		if op.ID != "" {
-			combined.Ops = append(combined.Ops, op)
-		}
+		combined.Ops = append(combined.Ops, op)
+		navigationEditorTrackLocation(locations, op)
 	}
 	privateRenames := map[string]string{}
 	for _, op := range state.previous.Ops {
@@ -227,15 +322,12 @@ func personalNavigationDelta(state navigationEditorState, input navigationEditor
 		_, canEdit := editable[id]
 		_, stillKnown := known[id]
 		if !canEdit && stillKnown {
+			op = personalNavigationAfter(op, locations, previousSiblings)
 			combined.Ops = append(combined.Ops, op)
+			navigationEditorTrackLocation(locations, op)
 			if op.Op == "rename" {
 				privateRenames[id] = *op.Title
 			}
-		}
-	}
-	for _, op := range visible.Ops {
-		if op.ID == "" {
-			combined.Ops = append(combined.Ops, op)
 		}
 	}
 	desired, _, err := navigation.ApplyDelta(state.layerBase, combined, navigation.UserLayer)

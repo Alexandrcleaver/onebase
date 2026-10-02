@@ -336,8 +336,10 @@ func TestPersonalNavigation_ExplicitNeutralRenamesAndRoleChangesMatrix(t *testin
 		alice.Renamed = []string{"cfg:academic-years", "cfg:periods", "cfg:periods-list"}
 		personal := personalSection(t, &alice, "cfg:academic-years")
 		privateItem := personal.Groups[0].Items[0]
+		accessibleAnchor := personal.Items[0]
+		personal.Items = personal.Items[1:]
 		personal.Groups[0].Items = nil
-		personal.Groups = append(personal.Groups, navigation.Group{ID: "new:retained-private", Title: "My private placement", Items: []navigation.Item{privateItem}})
+		personal.Groups = append(personal.Groups, navigation.Group{ID: "new:retained-private", Title: "My private placement", Items: []navigation.Item{accessibleAnchor, privateItem}})
 		personalSave(t, f, "alice", alice) // Explicit away/back-to-same text, no tree difference.
 		alice = f.personalEditor(t, "alice", personalSchool)
 		personalSection(t, &alice, "cfg:academic-years").Icon = "book-open"
@@ -395,7 +397,7 @@ func TestPersonalNavigation_ExplicitNeutralRenamesAndRoleChangesMatrix(t *testin
 		}
 		alice = f.personalEditor(t, "alice", personalSchool)
 		section = personalSection(t, &alice, "cfg:academic-years")
-		if section.Title != "Common" || section.Groups[0].Title != "Common group" || section.Groups[len(section.Groups)-1].Items[0].Title != "Common item" {
+		if section.Title != "Common" || section.Groups[0].Title != "Common group" || len(section.Groups[len(section.Groups)-1].Items) != 2 || section.Groups[len(section.Groups)-1].Items[1].ID != "cfg:periods-list" || section.Groups[len(section.Groups)-1].Items[1].Title != "Common item" {
 			t.Fatal("explicit/private intent lost", section)
 		}
 		bob := f.personalEditor(t, "bob", personalSchool)
@@ -403,6 +405,183 @@ func TestPersonalNavigation_ExplicitNeutralRenamesAndRoleChangesMatrix(t *testin
 			t.Fatal("Bob did not inherit common change")
 		}
 	})
+}
+
+func personalRevokePeriods(t *testing.T, f navigationHTTPFixture) func() {
+	t.Helper()
+	ctx := context.Background()
+	teacher, err := auth.LoadRoleFile("testdata/navigation-school/roles/Teacher.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited := *teacher
+	limited.Name = "LimitedTeacher"
+	limited.Permissions.Catalogs = map[string][]string{"УчебныеГоды": {"read"}, "Классы": {"read"}}
+	if err := f.server.authRepo.SyncRoles(ctx, []*auth.Role{&limited}); err != nil {
+		t.Fatal(err)
+	}
+	roles, err := f.server.authRepo.ListRoles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var teacherID string
+	for _, role := range roles {
+		if role.Name == "Teacher" {
+			teacherID = role.ID
+		}
+	}
+	user, err := f.server.authRepo.GetByLogin(ctx, "alice")
+	if err != nil || user == nil || teacherID == "" {
+		t.Fatalf("role fixture: %v, teacher=%s", err, teacherID)
+	}
+	if err := f.server.authRepo.AssignRole(ctx, user.ID, limited.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.server.authRepo.UnassignRole(ctx, user.ID, teacherID); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := f.server.authRepo.AssignRole(ctx, user.ID, teacherID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func personalGroupByID(t *testing.T, state *navigationBootstrap, id string) *navigation.Group {
+	t.Helper()
+	for i := range state.Desired.Sections {
+		for j := range state.Desired.Sections[i].Groups {
+			group := &state.Desired.Sections[i].Groups[j]
+			if group.ID == id {
+				return group
+			}
+		}
+	}
+	t.Fatalf("missing personal group %s", id)
+	return nil
+}
+
+func TestPersonalNavigation_PrivatePlacementWithAccessibleAnchor(t *testing.T) {
+	for _, scenario := range []struct {
+		name string
+		want []string
+	}{
+		{"unchanged", []string{"cfg:academic-years-list", "cfg:periods-list", "cfg:bells"}},
+		{"move-out", []string{"cfg:periods-list", "cfg:bells"}},
+		{"reorder", []string{"cfg:bells", "cfg:academic-years-list", "cfg:periods-list"}},
+		{"hide-original-parent", []string{"cfg:academic-years-list", "cfg:periods-list", "cfg:bells"}},
+		{"admin-hidden", []string{"cfg:academic-years-list", "cfg:bells"}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+				f := schoolNavigationFixture(t, db, "testdata/navigation-school", true)
+				state := f.personalEditor(t, "alice", personalSchool)
+				section := personalSection(t, &state, "cfg:academic-years")
+				anchor, private, sibling := section.Items[0], section.Groups[0].Items[0], section.Groups[1].Items[0]
+				section.Items = section.Items[1:]
+				section.Groups[0].Items = nil
+				section.Groups[1].Items = section.Groups[1].Items[1:]
+				parent := section
+				if scenario.name == "hide-original-parent" {
+					parent = personalSection(t, &state, "cfg:journals")
+				}
+				items := []navigation.Item{anchor, private, sibling}
+				if scenario.name == "admin-hidden" {
+					items = []navigation.Item{anchor, sibling, private}
+				}
+				parent.Groups = append(parent.Groups, navigation.Group{ID: "new:private-mix", Title: "Private mix", Items: items})
+				personalSave(t, f, "alice", state)
+				state = f.personalEditor(t, "alice", personalSchool)
+				var folderID string
+				for _, section := range state.Desired.Sections {
+					for _, group := range section.Groups {
+						if group.Title == "Private mix" {
+							folderID = group.ID
+						}
+					}
+				}
+				if !strings.HasPrefix(folderID, "usr:") || len(personalGroupByID(t, &state, folderID).Items) != 3 {
+					t.Fatal("initial placement was not saved", folderID)
+				}
+				regrant := personalRevokePeriods(t, f)
+				if scenario.name == "admin-hidden" {
+					admin := f.editor(t, personalSchool)
+					personalSection(t, &admin, "cfg:academic-years").Groups[0].Items = nil
+					if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, admin)); rec.Code != 303 {
+						t.Fatal("common hide", rec.Code)
+					}
+				}
+				state = f.personalEditor(t, "alice", personalSchool)
+				group := personalGroupByID(t, &state, folderID)
+				if len(group.Items) != 2 || group.Items[0].ID != anchor.ID || group.Items[1].ID != sibling.ID {
+					t.Fatal("permission projection", group.Items)
+				}
+				switch scenario.name {
+				case "move-out":
+					group.Items = group.Items[1:]
+					section = personalSection(t, &state, "cfg:academic-years")
+					section.Items = append(section.Items, anchor)
+				case "reorder":
+					group.Items[0], group.Items[1] = group.Items[1], group.Items[0]
+				case "hide-original-parent":
+					for i, section := range state.Desired.Sections {
+						if section.ID == "cfg:academic-years" {
+							state.Desired.Sections = append(state.Desired.Sections[:i], state.Desired.Sections[i+1:]...)
+							break
+						}
+					}
+				}
+				personalSection(t, &state, "cfg:journals").Icon = "book-open"
+				personalSave(t, f, "alice", state)
+				state = f.personalEditor(t, "alice", personalSchool)
+				checkPrivate := func(rec *httptest.ResponseRecorder) {
+					t.Helper()
+					if rec.Code != 200 {
+						t.Fatal("private response status", rec.Code)
+					}
+					for _, denied := range []string{"cfg:periods-list", "ПериодыОбучения", "Периоды обучения", "ClosedSentinel", "SECRET_", "closed-sentinel", url.PathEscape(strings.ToLower("ПериодыОбучения"))} {
+						if strings.Contains(rec.Body.String(), denied) {
+							t.Fatal("closed metadata in public response", denied)
+						}
+					}
+				}
+				checkPrivate(f.request(t, "GET", "/ui/settings/navigation?subsystem="+url.QueryEscape(personalSchool), "alice", nil))
+				checkPrivate(f.request(t, "POST", "/ui/settings/navigation/preview", "alice", personalNavigationForm(t, state)))
+				checkPrivate(f.request(t, "GET", "/ui?subsystem="+url.QueryEscape(personalSchool), "alice", nil))
+				if rec := f.request(t, "GET", "/ui/catalog/"+url.PathEscape(strings.ToLower("ПериодыОбучения")), "alice", nil); rec.Code != 403 {
+					t.Fatal("revoked direct URL", rec.Code)
+				}
+				admin := f.editor(t, personalSchool)
+				personalSection(t, &admin, "cfg:academic-years").Title = "Changed common"
+				if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, admin)); rec.Code != 303 {
+					t.Fatal("common rename", rec.Code)
+				}
+				regrant()
+				state = f.personalEditor(t, "alice", personalSchool)
+				group = personalGroupByID(t, &state, folderID)
+				if len(group.Items) != len(scenario.want) {
+					t.Fatalf("private placement lost: got %v, want %v", group.Items, scenario.want)
+				}
+				for i, id := range scenario.want {
+					if group.Items[i].ID != id {
+						t.Fatalf("private order: got %v, want %v", group.Items, scenario.want)
+					}
+				}
+				if scenario.name == "move-out" {
+					items := personalSection(t, &state, "cfg:academic-years").Items
+					if len(items) != 1 || items[0].ID != anchor.ID {
+						t.Fatal("visible move lost", items)
+					}
+				}
+				if scenario.name == "admin-hidden" {
+					raw, err := json.Marshal(state.Desired)
+					if err != nil || strings.Contains(string(raw), "cfg:periods-list") {
+						t.Fatal("common-hidden target resurrected", err)
+					}
+				}
+			})
+		})
+	}
 }
 
 func TestPersonalNavigation_AuthCSRFMalformedAndCorruptMatrix(t *testing.T) {
