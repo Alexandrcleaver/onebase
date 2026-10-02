@@ -2476,7 +2476,7 @@ filters:
 сохраняет порядок массивов; отсутствующий или пустой `nav` сохраняет глобальное
 алфавитное меню.
 
-**Смысловое меню (план 169, срезы A–C).** Необязательный `menu` допустим
+**Смысловое меню (план 169, срезы A–D).** Необязательный `menu` допустим
 в YAML подсистемы и глобальной `config/home_page.yaml`. Команда `onebase check`
 проверяет его, а «Предприятие» показывает section → group → item в порядке YAML.
 Одна папка может содержать объекты разных типов. Разделы и папки поддерживают
@@ -2551,7 +2551,49 @@ JSON Schema: `onebase schema subsystem` и `onebase schema home-page`.
 меню переносятся по `id`. Удаление пункта из раскладки не удаляет объект:
 неразмещённая разрешённая цель появляется в «Другое». Меню с YAML anchor/alias/merge
 сохраняйте через редактор YAML: визуальное сохранение такого графа отклоняется.
-Общие и персональные настройки в БД поставляются следующими срезами D–F.
+Базовые механизмы общих и персональных настроек в БД поставлены срезом D;
+страницы настройки и подключение слоёв к runtime относятся к срезам E/F.
+
+**Дельты навигации и CAS storage (срез D).** `internal/navigation` предоставляет
+`Diff`, `EncodeDelta`, `DecodeDelta`, `ApplyDelta` и `Compose`. Формат v1 хранит
+`version`, `base_hash` и `ops` по стабильным ID: `rename`, `move`, `hide`, `show`,
+`add_section`, `add_group`, `remove_custom`, `set_icon`. Пустые `parent`/`after`
+означают корень/начало соответствующего списка siblings. Для custom containers
+сервер вызывает `NewCustomID`: namespace `adm:` или `usr:` и UUID. Добавить item
+или подменить metadata target дельтой нельзя. Локализованные названия наследуются;
+`rename` задаёт явное название для всех языков, пустое название item возвращает
+его metadata label. Иконка может быть очищена явным `set_icon` с пустой строкой.
+
+`Diff` вычисляет изменения к предыдущему слою; неизменённые узлы не копируются
+в настройки. `Compose` применяет configuration → admin → user, а фильтрация
+по актуальным правам и удаление пустых родителей остаются обязанностью runtime
+DTO. Поэтому user слой не может восстановить скрытый администратором item.
+При изменении `base_hash` действующие операции сохраняются, новые config-ноды
+появляются автоматически; удалённые ссылки дают `stale`, без угадывания по title.
+Повреждённый stored JSON или структурно невалидный слой пропускается целиком;
+диагностика содержит код/ID, без JSON и названий из настройки.
+
+Storage использует `NavigationSettingsScope` и методы `GetNavigationSettings`,
+`SaveNavigationSettings`, `SaveDesiredNavigation`, `DeleteNavigationSettings`.
+Scope выбирает сервер; login для персональной настройки берётся из auth context.
+Context следует runtime identity: `global` или `subsystem:<name>`, включая
+отдельный `subsystem:global`. Ключи collision-safe, длины — байты UTF-8:
+`ui.navigation.admin.<len>:<context>` и
+`ui.navigation.user.<len>:<login>.<len>:<context>`.
+`Get` возвращает исходный raw JSON и SHA-256 revision; отсутствие ключа —
+пустая revision и наследование. CAS сравнивает исходный raw JSON одним условным
+INSERT/UPDATE/DELETE. Устаревший save/reset возвращает `storage.ErrVersionConflict`;
+пустая дельта удаляет key. Новые данные валидируются до SQL: JSON ≤ 64 KiB,
+≤ 1000 ops, ≤ 100 sections, ≤ 500 groups и ≤ 5000 item occurrences после merge,
+без duplicate ID, циклов или вложенности сверх section → group → item.
+
+Универсальный `.obz` переносит только два navigation-семейства с корректными
+length-prefix keys, сохраняя значения побайтно, в том числе повреждённый JSON.
+Clone и disaster recovery сначала очищают прежние navigation keys цели, затем
+восстанавливают набор архива; отсутствие layer в архиве означает наследование,
+а не сохранение прежнего override. Посторонние `_settings` не экспортируются.
+Публичные matrix-тесты storage и universal backup выполняются на SQLite и
+PostgreSQL при заданном `TEST_DATABASE_URL` (CI включает обе ветки).
 
 ```yaml
 name: Продажи
