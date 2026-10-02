@@ -351,7 +351,7 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
         } else {
           val = (v === null || v === undefined) ? '' : String(v);
         }
-        // Сервер сериализует дату как «2026-08-04T00:00» (формат datetime-local).
+        // Сервер сериализует дату как «2026-08-04T00:00:00» (формат datetime-local).
         // Для <input type="date"> это невалидное значение: браузер молча очищает
         // поле — дата на форме пропадала после первого же события, а следующая
         // запись затирала её в базе.
@@ -2892,12 +2892,14 @@ obManagedReady(obManagedInitDelegates);
   function obManagedSplitDate(value) {
     if (value == null || value === '') return null;
     var s = String(value);
-    var m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(s);
+    var m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/.exec(s);
     if (!m) return null;
     return {
       date: m[1] + '-' + m[2] + '-' + m[3],
       day: m[3] + '.' + m[2] + '.' + m[1],
-      time: (m[4] !== undefined) ? (m[4] + ':' + m[5]) : ''
+      time: (m[4] !== undefined) ? (m[4] + ':' + m[5]) : '',
+      // Секунды нужны редактору: без них правка строки отрезала бы их от даты.
+      seconds: (m[6] !== undefined) ? m[6] : ''
     };
   }
 
@@ -2927,6 +2929,9 @@ obManagedReady(obManagedInitDelegates);
     this.init = function() {
       input = document.createElement('input');
       input.type = 'datetime-local';
+      // Шаг в секунду, как у поля даты в шапке: иначе значение с секундами
+      // не проходит проверку поля, а без секунд правка строки отрезала бы их.
+      input.step = '1';
       input.className = 'editor-text';
       input.style.cssText = 'width:100%;height:100%;border:none;outline:none;padding:2px 4px;font-size:13px';
       args.container.appendChild(input);
@@ -2939,8 +2944,12 @@ obManagedReady(obManagedInitDelegates);
     this.setValue = function(val) { input.value = (val == null) ? '' : String(val); };
     this.loadValue = function(item) {
       var parts = obManagedSplitDate(item[args.column.field]);
-      defaultValue = parts ? (parts.date + 'T' + (parts.time || '00:00')) : '';
-      input.value = defaultValue;
+      input.value = parts
+        ? (parts.date + 'T' + (parts.time || '00:00') + (parts.seconds ? ':' + parts.seconds : ''))
+        : '';
+      // Браузер нормализует значение (нулевые секунды опускает), поэтому
+      // «не изменено» сверяется с тем, что поле показало, а не с исходной строкой.
+      defaultValue = input.value;
     };
     // Пустая ячейка отдаётся пустой строкой: сервер понимает её как «значения
     // нет» и пишет NULL. Отдавать сюда «0001-01-01» нельзя — это уже значение.

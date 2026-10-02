@@ -93,8 +93,33 @@ func choicePredicateSQL(d Dialect, entity *metadata.Entity, predicates []ChoiceP
 			next++
 			continue
 		}
+		// Строковый реквизит сравнивается со строкой — значением строкового
+		// конца пути: ВладелецКод дома хранит ИД улицы, а не ссылку на неё.
+		// Решает тип поля, а не значения: ссылочное поле по-прежнему принимает
+		// UUID и строкой. Значение — параметр запроса, а не текст SQL.
+		if field.Type == metadata.FieldTypeString && strings.TrimSpace(field.RefEntity) == "" {
+			if predicate.Op != metadata.FormChoiceOpEqual {
+				return "", nil, startArg, fmt.Errorf("choice filter %d: string field %q supports only eq", i, fieldName)
+			}
+			value, isText := predicate.Value.(string)
+			if !isText {
+				return "", nil, startArg, fmt.Errorf("choice filter %d: string field %q requires a string value", i, fieldName)
+			}
+			parts = append(parts, metadata.ColumnName(*field)+" = "+d.Placeholder(next))
+			args = append(args, value)
+			next++
+			continue
+		}
 		if strings.TrimSpace(field.RefEntity) == "" {
 			return "", nil, startArg, fmt.Errorf("choice filter %d: field %q is not a reference", i, fieldName)
+		}
+		// eq_or_empty без значения — пустой источник: только записи с пустой
+		// ссылкой. Пустая ссылка — NULL; на SQLite встречается и пустая
+		// строка (так её пишут импорты), на PostgreSQL колонка uuid и ''
+		// в ней не бывает.
+		if predicate.Op == metadata.FormChoiceOpEqualOrEmpty && predicate.Value == nil {
+			parts = append(parts, choiceEmptyRefSQL(d, metadata.ColumnName(*field)))
+			continue
 		}
 		id, err := choiceUUID(predicate.Value)
 		if err != nil {
@@ -104,6 +129,10 @@ func choicePredicateSQL(d Dialect, entity *metadata.Entity, predicates []ChoiceP
 		switch predicate.Op {
 		case metadata.FormChoiceOpEqual:
 			parts = append(parts, column+" = "+d.Placeholder(next))
+			args = append(args, idArg(d, id))
+			next++
+		case metadata.FormChoiceOpEqualOrEmpty:
+			parts = append(parts, "("+column+" = "+d.Placeholder(next)+" OR "+choiceEmptyRefSQL(d, column)+")")
 			args = append(args, idArg(d, id))
 			next++
 		case metadata.FormChoiceOpInHierarchy:
@@ -125,6 +154,14 @@ func choicePredicateSQL(d Dialect, entity *metadata.Entity, predicates []ChoiceP
 		}
 	}
 	return "(" + strings.Join(parts, " AND ") + ")", args, next, nil
+}
+
+// choiceEmptyRefSQL — «ссылка пуста» для eq_or_empty.
+func choiceEmptyRefSQL(d Dialect, column string) string {
+	if d.Name() == "sqlite" {
+		return "(" + column + " IS NULL OR " + column + " = '')"
+	}
+	return column + " IS NULL"
 }
 
 func choiceField(entity *metadata.Entity, name string) *metadata.Field {
