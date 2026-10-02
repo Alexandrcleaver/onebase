@@ -373,6 +373,10 @@ func analyze(prs []apiPull, owner string) report {
 		priority, prioritySource := queuePriority(labels, pr.CreatedAt, now)
 		item := candidate{Number: pr.Number, Title: pr.Title, URL: pr.HTMLURL, Head: pr.Head.SHA, Depth: depth, Stage: "review", Priority: priority, PrioritySource: prioritySource, UpdatedAt: pr.UpdatedAt}
 		currentCompletions, latestCompletion, latestOverride := currentProtocolState(pr.Comments, owner, pr.Head.SHA)
+		legacySourceCompletions := 0
+		if headIsBaseSyncMerge(pr) {
+			legacySourceCompletions, _, _ = currentProtocolState(pr.Comments, owner, pr.HeadParents[0])
+		}
 		carryDone, carryIntentOpen, v1AbortCurrent, baseAdvanced, protocolHistory, integrationAt := baseSyncRESTState(pr.Comments, owner, pr.Head.SHA, pr.HeadParents)
 		item.IntegrationAt = integrationAt
 		if baseAdvanced {
@@ -431,6 +435,22 @@ func analyze(prs []apiPull, owner string) report {
 				result.MergeCandidates = append(result.MergeCandidates, item)
 			case v1AbortCurrent && currentCompletions == 0:
 				result.ContentReviewCandidates = append(result.ContentReviewCandidates, item)
+			case currentCompletions > 0 && depth == currentCompletions && !protocolHistory:
+				// A PR may be opened with a merge commit already at its first HEAD.
+				// With no earlier committed review or base-sync transaction, its
+				// first review is a full content review of that exact HEAD, not a
+				// carried integration review of the merge's first parent. The
+				// independent mutation gate still proves review, ship and CI.
+				item.Stage = "merge"
+				result.MergeCandidates = append(result.MergeCandidates, item)
+			case depth > currentCompletions && headIsBaseSyncMerge(pr) && legacySourceCompletions == 0:
+				// A legacy integration review cannot reconstruct the first parent's
+				// content proof. Do not grant this PR single-flight ownership only to
+				// have the independent GraphQL gate reject it on every retry.
+				item.Stage = "legacy-source-proof-missing"
+				result.HumanWaiting = append(result.HumanWaiting, item)
+				result.add("yellow", "legacy_source_review_missing", pr.Number,
+					"первый родитель merge-коммита не имеет доверенного завершённого REVIEW; требуется восстановление маршрута человеком, остальные PR не блокируются")
 			case currentCompletions > 0 && depth > currentCompletions && headIsBaseSyncMerge(pr):
 				item.Stage = "legacy-integration-merge-ready"
 				result.ReviewCandidates = append(result.ReviewCandidates, item)
@@ -840,6 +860,9 @@ func checkContract(result *report, path string) {
 	mergeData, err := readContract(filepath.Join(skillsRoot, "merge-shepherd", "SKILL.md"))
 	if err != nil || !strings.Contains(text, "pp:base-sync-done") ||
 		!strings.Contains(text, "single-flight-барьер") ||
+		!strings.Contains(text, "Позиция edge нового коммита относительно") ||
+		!strings.Contains(text, "доказывай графом") ||
+		strings.Contains(text, "обязан быть ровно одним `PullRequestCommit` после") ||
 		!strings.Contains(string(mergeData), "pp:base-sync-intent") ||
 		!strings.Contains(string(mergeData), "повторный человеческий `ship` при валидной") ||
 		!strings.Contains(string(mergeData), "single-flight-барьер") {
