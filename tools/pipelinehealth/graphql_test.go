@@ -128,6 +128,7 @@ func gqlTestIssueNode(nodeID string, number int, comments []any) map[string]any 
 		"id":        nodeID,
 		"number":    number,
 		"title":     "Issue title",
+		"body":      "Issue body",
 		"url":       "https://example.test/issue",
 		"createdAt": "2026-09-01T00:00:00Z",
 		"updatedAt": "2026-09-02T00:00:00Z",
