@@ -1491,7 +1491,10 @@ function obReplaceLiveListContents(cur, fresh) {
   // Даже если выбранной строки сейчас нет, кэш мог остаться от прежнего выбора.
   // После live refresh такой ответ уже не описывает новую версию списка.
   if (typeof obDetailInvalidate === 'function') obDetailInvalidate();
+  var oldFeed = cur.querySelector('#feed-more');
+  if (oldFeed && oldFeed.__obFeedDispose) oldFeed.__obFeedDispose();
   cur.innerHTML = fresh.innerHTML;
+  obInitFeed(cur);
   if (selMine) listRestoreSel(selKey, cur, { focus: restoreFocus });
   else obEnsureListRovingTabindex(cur);
 }
@@ -2515,13 +2518,19 @@ function listSubmit(url, msg) {
   }
 }
 
-function obInitFeed() {
-  var more = document.getElementById('feed-more');
-  if (!more) return;
+function obInitFeed(root) {
+  root = root || document;
+  var more = root.querySelector('#feed-more');
+  if (!more || more.__obFeedDispose) return;
   var loading = false;
   var done = false;
-  function stop() {
+  var observer;
+  more.__obFeedDispose = function () {
     done = true;
+    if (observer) observer.disconnect();
+  };
+  function stop() {
+    more.__obFeedDispose();
     if (more && more.parentNode) more.parentNode.removeChild(more);
   }
   function loadNext() {
@@ -2533,7 +2542,7 @@ function obInitFeed() {
       return;
     }
     var sel = more.getAttribute('data-container');
-    var c = document.querySelector(sel);
+    var c = root.querySelector(sel);
     if (!c) {
       stop();
       return;
@@ -2545,6 +2554,8 @@ function obInitFeed() {
     fetch(window.location.pathname + '?' + sp.toString(), { credentials: 'same-origin' })
       .then(function (r) { return r.text(); })
       .then(function (html) {
+        // A live refresh may have replaced this feed while the GET was in flight.
+        if (done || !more.isConnected || !c.isConnected) return;
         var doc = new DOMParser().parseFromString(html, 'text/html');
         var items = doc.querySelectorAll(sel + ' > ' + more.getAttribute('data-item'));
         if (!items.length) {
@@ -2552,7 +2563,7 @@ function obInitFeed() {
           return;
         }
         items.forEach(function (el) { c.appendChild(document.importNode(el, true)); });
-        var loaded = document.getElementById('feed-loaded');
+        var loaded = root.querySelector('#feed-loaded');
         if (loaded) loaded.textContent = c.children.length;
         n++;
         more.setAttribute('data-next', n);
@@ -2574,9 +2585,10 @@ function obInitFeed() {
     }
   });
   if ('IntersectionObserver' in window) {
-    new IntersectionObserver(function (ents) {
+    observer = new IntersectionObserver(function (ents) {
       ents.forEach(function (en) { if (en.isIntersecting) loadNext(); });
-    }, { rootMargin: '300px' }).observe(more);
+    }, { rootMargin: '300px' });
+    observer.observe(more);
   }
 }
 
@@ -5718,7 +5730,7 @@ function initDetailPanel() {
 (function () {
   var css = '' +
     '.ob-list-wrap{display:flex;gap:12px;align-items:flex-start}' +
-    '.ob-list-wrap>.card{flex:1 1 auto;min-width:0}' +
+    '.ob-list-wrap>.card,.ob-list-content{flex:1 1 auto;min-width:0}' +
     '.ob-detail{position:relative;flex:0 0 auto;width:320px;background:#fff;border:1px solid #e2e8f0;' +
     'border-radius:8px;padding:0;align-self:stretch;max-height:calc(100vh - 160px);overflow:auto}' +
     '.ob-detail-grip{position:absolute;left:-4px;top:0;bottom:0;width:8px;cursor:col-resize}' +
