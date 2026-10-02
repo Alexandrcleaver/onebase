@@ -1465,6 +1465,8 @@
   "Условия идут по порядку и соединяются через И. Для подбора обязателен уникальный id выше.": "Conditions are evaluated in order and joined with AND. A unique element ID above is required for filtering.",
   "Устойчивый id элемента": "Stable element ID",
   "Команда формы ещё выполняется. Дождитесь её завершения.": "A form command is still running. Wait for it to finish.",
+  "Форма изменилась во время выполнения команды — переход не выполнен": "The form changed while the command was running — navigation was not performed",
+  "Форма содержит несохранённые изменения — переход не выполнен": "The form has unsaved changes — navigation was not performed",
   "Сначала завершите или восстановите проверку закрытия формы.": "Finish or recover the pending close check first.",
   "Результат уже сохранён. Скопируйте текущие правки и перезагрузите форму перед продолжением.": "The result has already been saved. Copy your current edits and reload the form before continuing.",
   "Исход операции неизвестен. Проверьте данные в отдельной вкладке и перезагрузите форму; повторная запись заблокирована.": "The operation outcome is unknown. Check the data in another tab and reload the form; further writes are blocked.",

@@ -122,12 +122,34 @@ func CheckFormChoiceFilter(proj *project.Project) []Issue {
 		}
 	}
 
-	var issues []Issue
-	for _, owner := range proj.Entities {
-		if owner == nil {
-			continue
+	// Владельцы форм: документы и справочники, а с #1840 и обработки —
+	// виртуальная сущность из параметров, та же, что видит рендер формы
+	// обработки. Без них choice_filter формы обработки проходил молча.
+	type choiceFormOwner struct {
+		entity *metadata.Entity
+		forms  []*metadata.FormModule
+		label  func(*metadata.FormModule) string
+	}
+	var owners []choiceFormOwner
+	for _, entity := range proj.Entities {
+		if entity != nil {
+			owners = append(owners, choiceFormOwner{entity, entity.Forms, func(form *metadata.FormModule) string {
+				return formFileLabel(entity, form)
+			}})
 		}
-		for _, form := range owner.Forms {
+	}
+	for _, proc := range proj.Processors {
+		if proc != nil {
+			owners = append(owners, choiceFormOwner{proc.VirtualEntity(), proc.Forms, func(form *metadata.FormModule) string {
+				return procFormFileLabel(proc.Name, form)
+			}})
+		}
+	}
+
+	var issues []Issue
+	for _, item := range owners {
+		owner := item.entity
+		for _, form := range item.forms {
 			if form == nil {
 				continue
 			}
@@ -143,7 +165,7 @@ func CheckFormChoiceFilter(proj *project.Project) []Issue {
 				if el == nil || el.ChoiceFilter == nil {
 					return true
 				}
-				label := formFileLabel(owner, form)
+				label := item.label(form)
 				name := formElementName(el)
 				add := func(format string, args ...any) {
 					issues = append(issues, Issue{
