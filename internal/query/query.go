@@ -2796,6 +2796,46 @@ func buildRefDimInfosWithEntities(dims []metadata.Field, entities []*metadata.En
 	return result
 }
 
+// refAttrColumnForPrevQualifier подбирает КОЛОНКУ реквизита у сущности,
+// присоединённой по ссылке: «Инициатор.УчётнаяЗапись» — это колонка
+// «учётнаязапись_id», а не «учётнаязапись». Ссылочный реквизит хранится с
+// суффиксом _id, и без подстановки запрос падал сырым «no such column» — только
+// на реквизитах-ссылках, поэтому выглядело как опечатка в конфигурации (#1784).
+//
+// pos — позиция реквизита; квалификатор берётся прямо перед точкой. Пустая
+// строка — «ничего не знаем», вызывающий оставляет имя как есть. refEntity —
+// на что ссылается реквизит (пусто у нессылочного): в выборке значение такого
+// разыменования — ссылка, как у прямого ссылочного реквизита. Тип также берётся
+// у присоединённой сущности: одноимённое поле основного источника не задаёт CAST.
+func (tr *translator) refAttrColumnForPrevQualifier(pos int, attr string) (col, refEntity string, fieldType metadata.FieldType) {
+	if pos < 2 || pos >= len(tr.tokens) {
+		return "", "", ""
+	}
+	if tr.tokens[pos-1].kind != tDot || tr.tokens[pos-2].kind != tIdent {
+		return "", "", ""
+	}
+	return tr.refAttrColumn(lowerFast(tr.tokens[pos-2].val), attr)
+}
+
+func (tr *translator) refAttrColumn(qualifier, attr string) (col, refEntity string, fieldType metadata.FieldType) {
+	rd := tr.findRefDim(qualifier)
+	if rd == nil || rd.refEntity == "" {
+		return "", "", ""
+	}
+	for _, ent := range tr.opts.Entities {
+		if !strings.EqualFold(ent.Name, rd.refEntity) {
+			continue
+		}
+		for _, f := range ent.Fields {
+			if strings.EqualFold(f.Name, attr) {
+				return metadata.ColumnName(f), strings.TrimSpace(f.RefEntity), f.Type
+			}
+		}
+		return "", "", ""
+	}
+	return "", "", ""
+}
+
 func (tr *translator) findRefDim(name string) *refDimInfo {
 	for i := range tr.refDims {
 		if tr.refDims[i].fieldName == name {
@@ -2965,15 +3005,22 @@ func preScanMainRefSource(tokens []tok, opts CompileOpts) mainRefSource {
 // «КАК X», иначе `id`: именно так называет её SQL (Ссылка → id, Реквизит.Ссылка →
 // ref_реквизит.id).
 func (tr *translator) noteRefOutput(entity string) {
+	tr.noteRefOutputAs(entity, "id")
+}
+
+// noteRefOutputAs — то же с именем колонки результата по умолчанию (без «КАК»).
+func (tr *translator) noteRefOutputAs(entity, defaultOut string) {
 	if entity == "" || tr.section != sectionSelect || tr.parenDepth > 0 {
 		return
 	}
-	out := "id"
+	out := defaultOut
 	if p := upperFast(tr.peek(0).val); p == "КАК" || p == "AS" {
 		if n := tr.peek(1); n.kind == tIdent {
 			// `КАК Ссылка` — имя зарезервировано: SQL-алиасом становится всё тот
 			// же id (ветка prevAlias ниже), а не слово «ссылка».
-			if alias := lowerFast(n.val); !isReferenceName(alias) {
+			if alias := lowerFast(n.val); isReferenceName(alias) {
+				out = "id"
+			} else {
 				out = alias
 			}
 		}
@@ -3285,7 +3332,13 @@ func (tr *translator) needsNumberCast(lower string) bool {
 	if _, isAlias := tr.aliases[lower]; isAlias {
 		return false // ссылка на алиас вывода (КАК ...), а не сырая колонка
 	}
-	if tr.colTypes[lower] != metadata.FieldTypeNumber {
+	return tr.needsNumberCastForType(tr.colTypes[lower])
+}
+
+// Квалифицированный реквизит получает тип от своего источника, независимо
+// от одноимённых полей основного источника и алиасов вывода.
+func (tr *translator) needsNumberCastForType(fieldType metadata.FieldType) bool {
+	if fieldType != metadata.FieldTypeNumber {
 		return false
 	}
 	if dialectOrDefault(tr.opts.Dialect).Name() != "sqlite" {
@@ -3574,6 +3627,14 @@ func (tr *translator) emitQualifiedColumn(col, lower string) {
 			tr.emit("COALESCE(" + tr.takeQualifier() + col + ", '')")
 			return
 		}
+	}
+	tr.emit(col)
+}
+
+func (tr *translator) emitRefAttrColumn(col string, fieldType metadata.FieldType) {
+	if len(tr.parts) >= 2 && tr.parts[len(tr.parts)-1] == "." && tr.needsNumberCastForType(fieldType) {
+		tr.emit("CAST(" + tr.takeQualifier() + col + " AS NUMERIC)")
+		return
 	}
 	tr.emit(col)
 }
@@ -4813,7 +4874,12 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 				} else if col, ok := tr.colMap[lower]; ok && !prevDot {
 					tr.emitOwnColumn(col, lower)
 				} else if prevDot {
-					if rd := tr.findRefDim(lower); rd != nil {
+					if col, refEntity, fieldType := tr.refAttrColumnForPrevQualifier(tr.pos-1, lower); col != "" {
+						// После точки реквизит принадлежит сущности квалификатора,
+						// даже если у основного источника есть одноимённое поле.
+						tr.emitRefAttrColumn(col, fieldType)
+						tr.noteRefOutputAs(refEntity, col)
+					} else if rd := tr.findRefDim(lower); rd != nil {
 						// Двухуровневая навигация: Источник.Ссылка.Реквизит.
 						// LEFT JOIN на связанную таблицу к этому моменту уже
 						// построен — не хватало только подстановки. Раньше путь
