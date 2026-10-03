@@ -795,3 +795,73 @@ elements:
 		t.Fatalf("parent_id condition changed on round trip: %+v", parent)
 	}
 }
+
+// ref (#1820) — третий вид источника в «Зависимом подборе»: UUID записи
+// доезжает до YAML и обратно, битый UUID редактор не записывает.
+func TestConfiguratorChoiceFilter_RefRoundTrip(t *testing.T) {
+	s := &Store{path: filepath.Join(t.TempDir(), "ibases.yaml")}
+	b := &Base{Path: t.TempDir(), ConfigSource: "file"}
+	if err := s.Add(b); err != nil {
+		t.Fatalf("Add base: %v", err)
+	}
+	h := &handler{store: s}
+	src := `schema: onebase.form/v1
+form:
+  name: ФормаОбъекта
+  kind: object
+  entity: Звонок
+elements:
+  - id: reason-picker
+    kind: ПолеВвода
+    name: ПолеПричинаОбращения
+    data_path: Объект.ПричинаОбращения
+`
+	post := func(conditions string) editOpResponse {
+		t.Helper()
+		form := url.Values{"op": {"setChoiceFilter"}, "node": {"elements.0"}, "choice_filter": {conditions}, "yaml": {src}}
+		req := httptest.NewRequest(http.MethodPost, "/bases/"+b.ID+"/configurator/forms/edit-op", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", b.ID)
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+		recorder := httptest.NewRecorder()
+		h.configuratorFormsEditOp(recorder, req)
+		var response editOpResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode response: %v; body=%s", err, recorder.Body.String())
+		}
+		return response
+	}
+
+	const folder = "d4ba641c-70ae-4632-bf99-035f4caaa0af"
+	response := post(`[{"field":"parent_id","op":"in_hierarchy","ref":"` + folder + `"},{"field":"is_folder","op":"eq","value":false}]`)
+	if !response.OK {
+		t.Fatalf("ok=false: %v", response.Errors)
+	}
+	yamlPath := filepath.Join(t.TempDir(), "form.form.yaml")
+	if err := os.WriteFile(yamlPath, []byte(response.YAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loader.NewManagedFormLoader().LoadFormFile(yamlPath, "Звонок")
+	if err != nil {
+		t.Fatalf("reload edited form: %v", err)
+	}
+	if len(loaded.Elements) != 1 || len(loaded.Elements[0].ChoiceFilter) != 2 {
+		t.Fatalf("choice_filter lost after save/load: %+v", loaded.Elements)
+	}
+	if got := loaded.Elements[0].ChoiceFilter[0]; got.Field != "parent_id" || got.Op != metadata.FormChoiceOpInHierarchy || got.Ref != folder || got.From != "" || got.Value != nil {
+		t.Fatalf("ref condition changed on round trip: %+v", got)
+	}
+
+	for name, conditions := range map[string]string{
+		"битый UUID":   `[{"field":"parent_id","op":"in_hierarchy","ref":"папка"}]`,
+		"нулевой UUID": `[{"field":"parent_id","op":"in_hierarchy","ref":"00000000-0000-0000-0000-000000000000"}]`,
+		"ref и from":   `[{"field":"parent_id","op":"in_hierarchy","ref":"` + folder + `","from":"Объект.Направление"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if response := post(conditions); response.OK {
+				t.Fatalf("редактор записал недопустимое условие:\n%s", response.YAML)
+			}
+		})
+	}
+}

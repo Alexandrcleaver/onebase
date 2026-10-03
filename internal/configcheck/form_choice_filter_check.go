@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/ivantit66/onebase/internal/metadata"
 	"github.com/ivantit66/onebase/internal/project"
 	"gopkg.in/yaml.v3"
@@ -80,7 +81,7 @@ func validateChoiceFilterYAML(node *yaml.Node, path, file string, issues *[]Issu
 		add(node, fmt.Sprintf("%s должен быть списком условий", path))
 		return
 	}
-	allowed := map[string]bool{"field": true, "op": true, "from": true, "value": true}
+	allowed := map[string]bool{"field": true, "op": true, "from": true, "value": true, "ref": true}
 	for index, condition := range node.Content {
 		conditionPath := fmt.Sprintf("%s[%d]", path, index)
 		if condition == nil || condition.Kind != yaml.MappingNode {
@@ -101,6 +102,14 @@ func validateChoiceFilterYAML(node *yaml.Node, path, file string, issues *[]Issu
 			case "value":
 				if value.Kind != yaml.ScalarNode || value.Tag != "!!bool" {
 					add(value, fmt.Sprintf("%s.value должен быть boolean", conditionPath))
+				}
+			case "ref":
+				// Пустая строка в структуре неотличима от отсутствующего ключа,
+				// поэтому `ref: ""` ловится здесь, по самому YAML (#1820).
+				if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+					add(value, fmt.Sprintf("%s.ref должен быть строкой с UUID", conditionPath))
+				} else if strings.TrimSpace(value.Value) == "" {
+					add(value, fmt.Sprintf("%s.ref пуст: нужен UUID записи справочника", conditionPath))
 				}
 			}
 		}
@@ -218,8 +227,15 @@ func CheckFormChoiceFilter(proj *project.Project) []Issue {
 
 					hasFrom := strings.TrimSpace(cond.From) != ""
 					hasValue := cond.Value != nil
-					if hasFrom == hasValue {
-						add("%s: требуется ровно одно из from и value", where)
+					hasRef := strings.TrimSpace(cond.Ref) != ""
+					sourceCount := 0
+					for _, present := range []bool{hasFrom, hasValue, hasRef} {
+						if present {
+							sourceCount++
+						}
+					}
+					if sourceCount != 1 {
+						add("%s: требуется ровно одно из from, value и ref", where)
 						continue
 					}
 
@@ -240,6 +256,16 @@ func CheckFormChoiceFilter(proj *project.Project) []Issue {
 							add("%s: у справочника %s нет реквизита %q", where, target.Name, fieldName)
 							continue
 						}
+					}
+
+					// Постоянная ссылка (#1820): UUID записи справочника, на который
+					// ссылается field. Существование записи статически не проверить —
+					// рантайм при её отсутствии даёт пустой подбор (fail-closed).
+					if hasRef {
+						if problem := formChoiceRefProblem(cond, isFolder, target, targetField, entities); problem != "" {
+							add("%s: %s", where, problem)
+						}
+						continue
 					}
 
 					switch cond.Op {
@@ -324,6 +350,34 @@ func CheckFormChoiceFilter(proj *project.Project) []Issue {
 		}
 	}
 	return issues
+}
+
+// formChoiceRefProblem проверяет условие с постоянной ссылкой (ref, #1820):
+// формат UUID и сочетание field/op. Пусто — условие корректно.
+func formChoiceRefProblem(cond metadata.FormChoiceCondition, isFolder bool, target *metadata.Entity, targetField *metadata.Field, entities map[string]*metadata.Entity) string {
+	literal := strings.TrimSpace(cond.Ref)
+	id, err := uuid.Parse(literal)
+	if err != nil {
+		return fmt.Sprintf("ref %q не является UUID", cond.Ref)
+	}
+	if id == uuid.Nil {
+		return "ref — нулевой UUID: нужен UUID записи справочника"
+	}
+	if isFolder || targetField == nil || strings.TrimSpace(targetField.RefEntity) == "" {
+		return fmt.Sprintf("ref допустим только у ссылочного реквизита или parent_id, а %q им не является", cond.Field)
+	}
+	switch cond.Op {
+	case metadata.FormChoiceOpEqual, metadata.FormChoiceOpEqualOrEmpty:
+		return ""
+	case metadata.FormChoiceOpInHierarchy:
+		hierarchy := entities[strings.ToLower(targetField.RefEntity)]
+		if hierarchy == nil || hierarchy.Kind != metadata.KindCatalog || !hierarchy.Hierarchical {
+			return fmt.Sprintf("%s.%s не ссылается на иерархический справочник", target.Name, targetField.Name)
+		}
+		return ""
+	default:
+		return fmt.Sprintf("неизвестный оператор %q", cond.Op)
+	}
 }
 
 // formChoiceRefSource resolves an explicit two-segment form path to the entity
