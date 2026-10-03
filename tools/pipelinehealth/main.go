@@ -498,6 +498,15 @@ func analyze(prs []apiPull, owner string) report {
 			result.HumanWaiting = append(result.HumanWaiting, item)
 		case labels["changes-requested"] && !overrideOpen:
 			result.FixCandidates = append(result.FixCandidates, item)
+		case depth > currentCompletions && headIsBaseSyncMerge(pr) && legacySourceCompletions == 0 && !carryDone && !v1AbortCurrent:
+			// A completed review of this HEAD is not enough to turn an earlier
+			// needs-decision review of a different SHA into source proof. Show the
+			// recovery before asking for ship; otherwise the owner is invited into
+			// a merge gate that cannot succeed.
+			item.Stage = "legacy-source-proof-missing"
+			result.HumanWaiting = append(result.HumanWaiting, item)
+			result.add("yellow", "legacy_source_review_missing", pr.Number,
+				"первый родитель merge-коммита не имеет доверенного завершённого REVIEW; ship не поможет: нужен новый обычный content HEAD и полное REVIEW")
 		case labels["reviewed"] && currentCompletions > 0 && !overrideOpen:
 			// Valid-looking current review is waiting for the human ship decision.
 			result.ReviewedWaitingShip = append(result.ReviewedWaitingShip, item)
