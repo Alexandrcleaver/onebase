@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -77,6 +78,7 @@ query PipelineHealthSnapshot(
         id
         number
         title
+        body
         url
         createdAt
         updatedAt
@@ -590,6 +592,7 @@ type gqlIssue struct {
 	NodeID    string               `json:"id"`
 	Number    int                  `json:"number"`
 	Title     string               `json:"title"`
+	Body      string               `json:"body"`
 	URL       string               `json:"url"`
 	CreatedAt string               `json:"createdAt"`
 	UpdatedAt string               `json:"updatedAt"`
@@ -610,6 +613,7 @@ func (issue *gqlIssue) UnmarshalJSON(data []byte) error {
 		{"id", &issue.NodeID},
 		{"number", &issue.Number},
 		{"title", &issue.Title},
+		{"body", &issue.Body},
 		{"url", &issue.URL},
 		{"createdAt", &issue.CreatedAt},
 		{"updatedAt", &issue.UpdatedAt},
@@ -817,7 +821,7 @@ func loadPipelineInputsGraphQL(client pipelineGraphQLClient, repo, pullFixture, 
 		return nil, nil, fmt.Errorf("GitHub GraphQL client is required outside pull fixture mode")
 	}
 	if issueFixture != "" {
-		pulls, _, err := loadGraphQLSnapshot(client, repo, true, false)
+		pulls, _, err := loadStableGraphQLSnapshot(client, repo, true, false)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -827,7 +831,25 @@ func loadPipelineInputsGraphQL(client pipelineGraphQLClient, repo, pullFixture, 
 		}
 		return pulls, issues, nil
 	}
-	return loadGraphQLSnapshot(client, repo, true, true)
+	return loadStableGraphQLSnapshot(client, repo, true, true)
+}
+
+// A page count changing is transient queue churn, not permission to accept a
+// partial snapshot. Restart the entire read, at most three times, under one
+// shared query budget. Other failures remain fail-closed without retries.
+type pipelineSnapshotChurn struct{ detail string }
+
+func (err *pipelineSnapshotChurn) Error() string { return err.detail }
+
+func loadStableGraphQLSnapshot(client pipelineGraphQLClient, repo string, includePulls, includeIssues bool) ([]apiPull, []apiIssue, error) {
+	bounded := &limitedPipelineGraphQLClient{delegate: client}
+	for attempt := 0; ; attempt++ {
+		pulls, issues, err := loadGraphQLSnapshot(bounded, repo, includePulls, includeIssues)
+		var churn *pipelineSnapshotChurn
+		if err == nil || attempt == 2 || !errors.As(err, &churn) {
+			return pulls, issues, err
+		}
+	}
 }
 
 func readPullFixture(path string) ([]apiPull, error) {
@@ -917,7 +939,7 @@ func loadGraphQLSnapshot(client pipelineGraphQLClient, repo string, includePulls
 			if pullTotal < 0 {
 				pullTotal = connection.TotalCount
 			} else if connection.TotalCount != pullTotal {
-				return nil, nil, fmt.Errorf("load pull requests: totalCount changed from %d to %d", pullTotal, connection.TotalCount)
+				return nil, nil, &pipelineSnapshotChurn{fmt.Sprintf("load pull requests: totalCount changed from %d to %d", pullTotal, connection.TotalCount)}
 			}
 			if connection.TotalCount < 0 {
 				return nil, nil, fmt.Errorf("load pull requests: negative totalCount %d", connection.TotalCount)
@@ -949,7 +971,7 @@ func loadGraphQLSnapshot(client pipelineGraphQLClient, repo string, includePulls
 			if issueTotal < 0 {
 				issueTotal = connection.TotalCount
 			} else if connection.TotalCount != issueTotal {
-				return nil, nil, fmt.Errorf("load issues: totalCount changed from %d to %d", issueTotal, connection.TotalCount)
+				return nil, nil, &pipelineSnapshotChurn{fmt.Sprintf("load issues: totalCount changed from %d to %d", issueTotal, connection.TotalCount)}
 			}
 			if connection.TotalCount < 0 {
 				return nil, nil, fmt.Errorf("load issues: negative totalCount %d", connection.TotalCount)
@@ -1344,6 +1366,7 @@ func convertGQLIssue(raw gqlIssue) (apiIssue, error) {
 	issue := apiIssue{
 		Number:       raw.Number,
 		Title:        raw.Title,
+		Body:         raw.Body,
 		HTMLURL:      raw.URL,
 		CreatedAt:    raw.CreatedAt,
 		UpdatedAt:    raw.UpdatedAt,

@@ -456,13 +456,18 @@ var periodicityLevels = map[string]string{
 func periodTruncSQL(level string, d storage.Dialect) string {
 	switch d.Name() {
 	case "sqlite":
-		// p — нормализованное представление period для функций дат SQLite.
-		// Берём первые 19 символов (`YYYY-MM-DD HH:MM:SS`), что отсекает хвост
-		// таймзоны вида ` +0300 MSK`, который мог попасть в старые базы (см.
-		// storage.sqliteTimeLayout): без этого strftime/date вернули бы NULL и
-		// группировка по периоду молча схлопнулась бы. Для новых, уже ISO-данных
-		// substr — это no-op.
-		p := "substr(period,1,19)"
+		// p — местные стенные часы period для функций дат SQLite. Хранится
+		// period в UTC (storage.sqliteTimeLayout), и без перевода движение в
+		// 01:30 по Москве 1 октября попадало в сентябрьскую корзину, хотя
+		// Месяц(Период) того же запроса (#1409) и PostgreSQL (зона сессии —
+		// зона приложения) относят его к октябрю. Перевод — та же
+		// ob_local_datetime, что у календарных функций.
+		//
+		// Запасной путь — первые 19 символов (`YYYY-MM-DD HH:MM:SS`): старые
+		// базы могли хранить Go-строку с хвостом ` +0300 MSK`, которую
+		// ob_local_datetime не разбирает; её стенные часы и так местные, а без
+		// среза strftime/date вернули бы NULL и группировка молча схлопнулась бы.
+		p := "COALESCE(ob_local_datetime(period), substr(period,1,19))"
 		switch level {
 		case "day":
 			return "date(" + p + ")"
@@ -648,6 +653,159 @@ func (rd refDimInfo) displayCol() string {
 	return rd.joinAlias + ".наименование"
 }
 
+// joinSource — то, что стоит в авто-JOIN ссылочного поля после LEFT JOIN.
+// Учётные записи присоединяются не таблицей, а проекцией из колонок, которые
+// язык запросов и так читает (Ссылка, Логин, ПолноеИмя, представление).
+// Звёздочка без квалификатора разворачивается во все колонки всех источников
+// FROM, включая авто-JOIN, а он появляется, как только запрос упоминает
+// ссылку: «ВЫБРАТЬ * ИЗ Документ.Заказ ГДЕ Автор.Логин <> ""» отдавал хеш
+// пароля, секрет второго фактора и признак администратора (#1752). Проекция
+// закрывает и этот путь, и любой другой, где колонки соединения читаются
+// мимо проверки имён реквизитов.
+func (rd refDimInfo) joinSource() string {
+	if metadata.IsSystemRefTarget(rd.refEntity) {
+		return "(SELECT id, login, full_name FROM " + rd.joinTable + ")"
+	}
+	return rd.joinTable
+}
+
+// systemRefQualifierAt возвращает ссылочный реквизит на системную таблицу
+// учётных записей, если токен pos — его имя и вместо него уже выпущен
+// псевдоним авто-JOIN с точкой («ref_автор .»). Иначе nil: одноимённый алиас
+// источника или обычная колонка сюда не попадают.
+func (tr *translator) systemRefQualifierAt(pos int) *refDimInfo {
+	if pos < 0 || pos >= len(tr.tokens) || tr.tokens[pos].kind != tIdent {
+		return nil
+	}
+	rd := tr.findRefDim(lowerFast(tr.tokens[pos].val))
+	if rd == nil || !metadata.IsSystemRefTarget(rd.refEntity) {
+		return nil
+	}
+	n := len(tr.parts)
+	if n < 2 || tr.parts[n-1] != "." || tr.parts[n-2] != rd.joinAlias {
+		return nil
+	}
+	return rd
+}
+
+// systemRefAttributeSQL сопоставляет имя реквизита учётной записи выражению
+// над псевдонимом авто-JOIN. Наименование совпадает с представлением ссылки
+// (displayCol); Логин и ПолноеИмя — то, что и так показывает подбор учёток.
+// Колонки аутентификации (хеш пароля, секрет второго фактора, признак
+// администратора, привязка к внешнему провайдеру) не читаются никогда.
+func systemRefAttributeSQL(rd *refDimInfo, name string) (string, bool) {
+	switch lowerFast(name) {
+	case "наименование", "description", "представление", "presentation":
+		return rd.displayCol(), true
+	case "логин", "login":
+		return rd.joinAlias + ".login", true
+	case "полноеимя", "fullname":
+		return rd.joinAlias + ".full_name", true
+	}
+	return "", false
+}
+
+// emitSystemRefAttribute заменяет выпущенное «ref_x .» выражением реквизита
+// учётной записи; qpos — позиция токена ссылочного реквизита. Самостоятельный
+// элемент списка выборки без явного КАК получает имя реквизита, как оно
+// написано в запросе: иначе колонка результата называлась бы login или
+// coalesce, и Выборка.Логин её не находила. Внутри выражения имени не нужно,
+// а в аргументе функции оно недопустимо: «MAX(x AS логин)» не разбирается.
+func (tr *translator) emitSystemRefAttribute(rd *refDimInfo, qpos int, name string) error {
+	expr, ok := systemRefAttributeSQL(rd, name)
+	if !ok {
+		// Ключ — одним литералом: i18ncheck собирает ключи из исходника.
+		return i18nerr.Errorf(
+			"у ссылки на учётную запись в запросе доступны только Ссылка, Наименование, Логин и ПолноеИмя: «%s.%s» недоступно",
+			tr.tokens[qpos].val, name)
+	}
+	tr.parts = tr.parts[:len(tr.parts)-2]
+	tr.emit(expr)
+	if tr.section == sectionSelect && tr.standaloneSelectItem(tr.systemRefPathStart(qpos), qpos+3) {
+		if p := upperFast(tr.peek(0).val); p != "КАК" && p != "AS" {
+			alias := lowerFast(name)
+			tr.emit("AS")
+			tr.emit(alias)
+			tr.aliases[alias] = struct{}{}
+		}
+	}
+	return nil
+}
+
+// systemRefPathStart — первый токен пути к реквизиту учётной записи: сам
+// ссылочный реквизит либо квалификатор источника перед ним. Квалификатор
+// («З» в «З.Автор.Логин») к этому моменту уже срезан из вывода
+// (dropSourceQualifier): реквизит берётся из псевдонима авто-JOIN. В токенах
+// он остался, и без него границы самостоятельного элемента выборки считались
+// от «Автор»: перед ним стояла точка, элемент признавался частью выражения и
+// терял неявное имя колонки — «ВЫБРАТЬ З.Автор.Логин» отдавал login,
+// ПолноеИмя — full_name, Наименование — целое выражение COALESCE, а
+// «УПОРЯДОЧИТЬ ПО Логин» падало на no such column. Дотянуться до
+// квалификатора безопасно: без него путь не доходит сюда с точкой перед
+// реквизитом, а глубже одного перехода навигация отклоняется
+// (assertSingleHopNavigation).
+func (tr *translator) systemRefPathStart(qpos int) int {
+	if qpos >= 2 && tr.tokens[qpos-1].kind == tDot && tr.tokens[qpos-2].kind == tIdent {
+		return qpos - 2
+	}
+	return qpos
+}
+
+// systemRefByJoinAlias — ссылочный реквизит на учётные записи, чей псевдоним
+// авто-JOIN совпал с именем из текста запроса. Псевдоним — служебное имя
+// транслятора: через «ref_автор.<колонка>» читалась бы вся строка _users,
+// включая хеш пароля, мимо проверки объявленных реквизитов.
+func (tr *translator) systemRefByJoinAlias(name string) *refDimInfo {
+	for i := range tr.refDims {
+		rd := &tr.refDims[i]
+		if rd.joinAlias == name && metadata.IsSystemRefTarget(rd.refEntity) {
+			return rd
+		}
+	}
+	return nil
+}
+
+// standaloneSelectItem — токены [from, to) составляют целый элемент списка
+// выборки: стоят на глубине его SELECT, перед ними начало списка (ВЫБРАТЬ,
+// РАЗЛИЧНЫЕ) или запятая списка, после — запятая, КАК, ИЗ или конец
+// вложенного запроса. «ПЕРВЫЕ N» сюда не доходит: extractFirstN вырезает его
+// из токенов до трансляции.
+func (tr *translator) standaloneSelectItem(from, to int) bool {
+	ctx, toks := tr.sourceCtx, tr.tokens
+	if from < 1 || to >= len(toks) || from >= len(ctx.tokenDepth) || to >= len(ctx.tokenDepth) {
+		return false
+	}
+	depth := ctx.selectDepthAt(toks, from)
+	if depth < 0 || ctx.tokenDepth[from] != depth {
+		return false
+	}
+	prev := toks[from-1]
+	switch prev.kind {
+	case tComma:
+		if ctx.tokenDepth[from-1] != depth {
+			return false
+		}
+	case tIdent:
+		kw, ok := sqlKW(prev.val)
+		if !ok || (kw != "SELECT" && kw != "DISTINCT" && kw != "ALL") {
+			return false
+		}
+	default:
+		return false
+	}
+	next := toks[to]
+	switch next.kind {
+	case tComma:
+		return ctx.tokenDepth[to] == depth
+	case tRParen, tEOF:
+		return true
+	case tIdent:
+		kw, ok := sqlKW(next.val)
+		return ok && (kw == "AS" || kw == "FROM" || kw == "UNION")
+	}
+	return false
+}
+
 type translator struct {
 	tokens       []tok
 	pos          int
@@ -739,6 +897,24 @@ func (ctx sourceContext) sectionAt(tokenPos int) querySection {
 		return sectionOther
 	}
 	return ctx.tokenSection[tokenPos]
+}
+
+// selectDepthAt — глубина скобок ключевого слова SELECT той области, в списке
+// выборки которой стоит токен pos; -1, если pos не в списке выборки.
+func (ctx sourceContext) selectDepthAt(tokens []tok, pos int) int {
+	scopeID, ok := ctx.scopeIDAt(pos)
+	if !ok || ctx.sectionAt(pos) != sectionSelect {
+		return -1
+	}
+	for i := pos; i >= 0; i-- {
+		if id, ok := ctx.scopeIDAt(i); !ok || id != scopeID || tokens[i].kind != tIdent {
+			continue
+		}
+		if kw, ok := sqlKW(tokens[i].val); ok && kw == "SELECT" {
+			return ctx.tokenDepth[i]
+		}
+	}
+	return -1
 }
 
 func (ctx sourceContext) isReferenceAliasAt(tokenPos int, lower string) bool {
@@ -1370,6 +1546,21 @@ func (tr *translator) findAccountRegister(name string) *metadata.AccountRegister
 	return nil
 }
 
+// accountChartCond ограничивает счета _accounts планом счетов регистра. В
+// _accounts лежат счета всех планов конфигурации, и коды в разных планах
+// совпадают: без условия счёт «41» второго плана давал вторую строку остатков и
+// оборотов с теми же суммами, а счета чужого плана попадали в выборку с нулём.
+// storage.AccountBalances/AccountTurnovers фильтруют по плану так же.
+//
+// Аргумент добавляется в момент вызова, поэтому вызывать функцию нужно там, где
+// условие встаёт в текст SQL: плейсхолдеры SQLite анонимные, и порядок
+// аргументов обязан совпасть с порядком их появления.
+func (tr *translator) accountChartCond(ar *metadata.AccountRegister, alias string) string {
+	d := dialectOrDefault(tr.opts.Dialect)
+	tr.args = append(tr.args, ar.Accounts)
+	return alias + ".plan = " + d.Placeholder(len(tr.args))
+}
+
 // translateAccountFilter переводит токены фильтра виртуальной таблицы регистра
 // бухгалтерии, временно регистрируя в colMap разрешение имён, специфичных для ВТ:
 // «Счёт» → a.code и «СубконтоN» / «<ИмяСубконто>» → r.субконтоN. Изменения
@@ -1527,9 +1718,11 @@ func (tr *translator) genAccountBalances(ar *metadata.AccountRegister, args [][]
 		sb.WriteString(" AND ")
 		sb.WriteString(s)
 	}
+	sb.WriteString(" WHERE ")
+	sb.WriteString(tr.accountChartCond(ar, "a"))
 	if len(args) > 1 && len(args[1]) > 0 {
 		if s := tr.translateAccountFilter(ar, args[1]); s != "" {
-			sb.WriteString(" WHERE (")
+			sb.WriteString(" AND (")
 			sb.WriteString(s)
 			sb.WriteString(")")
 		}
@@ -1575,7 +1768,7 @@ func (tr *translator) genAccountBalancesFromTotals(ar *metadata.AccountRegister)
 		selectList += ", " + strings.Join(resCols, ", ")
 	}
 	sql := "SELECT " + selectList + " FROM _accounts a LEFT JOIN " + totals +
-		" t ON t.счёт = a.code GROUP BY a.code, a.name"
+		" t ON t.счёт = a.code WHERE " + tr.accountChartCond(ar, "a") + " GROUP BY a.code, a.name"
 	if len(subGroup) > 0 {
 		sql += ", " + strings.Join(subGroup, ", ")
 	}
@@ -1665,7 +1858,9 @@ func (tr *translator) genAccountBalancesFromTotalsAtMoment(ar *metadata.AccountR
 			", COALESCE(SUM(u." + cc + "),0) AS " + cc +
 			", COALESCE(SUM(u." + dc + " - u." + cc + "),0) AS " + col + "остаток"
 	}
-	sql := "SELECT " + outer + " FROM _accounts a LEFT JOIN (" + inner + ") u ON u.счёт = a.code GROUP BY a.code, a.name"
+	// Аргументы inner уже добавлены выше: условие на план стоит в тексте после него.
+	sql := "SELECT " + outer + " FROM _accounts a LEFT JOIN (" + inner + ") u ON u.счёт = a.code WHERE " +
+		tr.accountChartCond(ar, "a") + " GROUP BY a.code, a.name"
 	if len(groupSub) > 0 {
 		sql += ", " + strings.Join(groupSub, ", ")
 	}
@@ -1786,7 +1981,9 @@ func (tr *translator) accountTurnoversOuter(ar *metadata.AccountRegister, subCol
 		out += ", COALESCE(SUM(u." + col + "_дт),0) AS " + col + "_дт" +
 			", COALESCE(SUM(u." + col + "_кт),0) AS " + col + "_кт"
 	}
-	sql := "SELECT " + out + " FROM (" + inner + ") u JOIN _accounts a ON a.code = u.счёт GROUP BY u.счёт, a.name"
+	// Аргументы inner добавлены до вызова: условие на план стоит в тексте после него.
+	sql := "SELECT " + out + " FROM (" + inner + ") u JOIN _accounts a ON a.code = u.счёт AND " +
+		tr.accountChartCond(ar, "a") + " GROUP BY u.счёт, a.name"
 	if len(groupSub) > 0 {
 		sql += ", " + strings.Join(groupSub, ", ")
 	}
@@ -1855,9 +2052,11 @@ func (tr *translator) genAccountTurnovers(ar *metadata.AccountRegister, args [][
 		sb.WriteString(" AND ")
 		sb.WriteString(s)
 	}
+	sb.WriteString(" WHERE ")
+	sb.WriteString(tr.accountChartCond(ar, "a"))
 	if len(args) > 2 && len(args[2]) > 0 {
 		if s := tr.translateAccountFilter(ar, args[2]); s != "" {
-			sb.WriteString(" WHERE (")
+			sb.WriteString(" AND (")
 			sb.WriteString(s)
 			sb.WriteString(")")
 		}
@@ -2672,7 +2871,7 @@ func (tr *translator) emitVTSubquery(subq, defaultAlias string) error {
 				} else if s != "" {
 					joinCond += " AND " + s
 				}
-				tr.emit(fmt.Sprintf("LEFT JOIN %s %s ON %s", rd.joinTable, rd.joinAlias, joinCond))
+				tr.emit(fmt.Sprintf("LEFT JOIN %s %s ON %s", rd.joinSource(), rd.joinAlias, joinCond))
 				// #14: связанная сущность ссылочного измерения VT — источник RBAC.
 				tr.addRefSource(rd)
 			}
@@ -4366,7 +4565,7 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 					} else if s != "" {
 						joinCond += " AND " + s
 					}
-					tr.emit(fmt.Sprintf("LEFT JOIN %s %s ON %s", rd.joinTable, rd.joinAlias, joinCond))
+					tr.emit(fmt.Sprintf("LEFT JOIN %s %s ON %s", rd.joinSource(), rd.joinAlias, joinCond))
 					// #14: авто-JOIN ссылочного поля читает наименование/номер
 					// связанной сущности — регистрируем её как источник для RBAC,
 					// иначе чтение через ссылку обходит проверку прав.
@@ -4425,6 +4624,15 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 
 		// Number / star / operator
 		if t.kind == tNum || t.kind == tStar || t.kind == tOp {
+			// Автор.* разворачивается в ref_автор.* и раскрывает всю строку
+			// _users, минуя проверку имён реквизитов в ветке tIdent ниже.
+			if t.kind == tStar && tr.prevWasDot {
+				if rd := tr.systemRefQualifierAt(tr.pos - 2); rd != nil {
+					return Result{}, i18nerr.Errorf(
+						"у ссылки на учётную запись в запросе доступны только Ссылка, Наименование, Логин и ПолноеИмя: «%s.%s» недоступно",
+						tr.tokens[tr.pos-2].val, "*")
+				}
+			}
 			tr.prevWasDot = false
 			tr.advance()
 			tr.emit(t.val)
@@ -4470,6 +4678,19 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 					prevAlias = !prevDot
 				}
 			}
+			// Псевдоним авто-JOIN учётных записей (ref_автор) — служебное имя
+			// транслятора, а не часть языка. Через него читалась бы вся строка
+			// _users мимо проверки объявленных реквизитов ниже, поэтому в
+			// тексте запроса он недоступен в любой позиции, кроме объявления.
+			_, ownField := tr.colTypes[lower]
+			if !prevDot && !prevAlias && (!ownField || nextIsDot) {
+				if rd := tr.systemRefByJoinAlias(lower); rd != nil {
+					// Ключ — одним литералом: i18ncheck собирает ключи из исходника.
+					return Result{}, i18nerr.Errorf(
+						"«%s» — служебное имя соединения с учётными записями, в запросе оно недоступно: реквизиты учётной записи читаются через точку от ссылки — Ссылка, Наименование, Логин и ПолноеИмя",
+						t.val)
+				}
+			}
 			// Булевы литералы Истина/Ложь. Без этой ветки они уезжали в SQL как
 			// имена колонок, и естественный отбор `ГДЕ Активен = Истина` падал
 			// «no such column: истина» (issue #704). Слово остаётся именем там,
@@ -4477,7 +4698,6 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 			// (КАК Истина), в ссылке на уже объявленный алиас вывода
 			// (... КАК Истина ... УПОРЯДОЧИТЬ ПО Истина) и при одноимённом поле
 			// источника.
-			_, ownField := tr.colTypes[lower]
 			_, isAlias := tr.aliases[lower]
 			if !prevDot && !prevAlias && !nextIsDot && !ownField && !isAlias {
 				if lit, ok := boolLiteralSQL(lower, dialectName(tr.opts.Dialect)); ok {
@@ -4507,6 +4727,21 @@ func translate(tokens []tok, opts CompileOpts) (Result, error) {
 					tr.emit(tr.qualifyReference("id"))
 				}
 				continue
+			}
+			// Учётная запись входа (reference:_users, #1646) — системная таблица,
+			// а не сущность конфигурации: источником прав она сознательно не
+			// регистрируется, поэтому через точку читается только объявленное —
+			// Ссылка (выше), Наименование, Логин и ПолноеИмя. Раньше любое имя
+			// уходило в SQL дословно, и «Автор.password_hash» с «Автор.totp_secret»
+			// отдавали хеш пароля и секрет второго фактора любому запросу, в том
+			// числе ИИ-помощнику, работающему от имени не-администратора.
+			if prevDot {
+				if rd := tr.systemRefQualifierAt(tr.pos - 3); rd != nil {
+					if err := tr.emitSystemRefAttribute(rd, tr.pos-3, t.val); err != nil {
+						return Result{}, err
+					}
+					continue
+				}
 			}
 			// Системные колонки регистра — PascalCase русские алиасы
 			// (см. systemColAlias). Работает и с префиксом (Х.Период), и без,
