@@ -33,19 +33,19 @@ import (
 // lowercase. Прежний прямой `fields[f.Name]` промахивался → period оставался
 // time.Now() и движения дрейфовали по часовым поясам.
 func SetPeriodFromFields(mc *runtime.MovementsCollector, entity *metadata.Entity, fields map[string]any) {
-	for _, f := range entity.Fields {
-		if f.Type != metadata.FieldTypeDate {
+	f := entity.DocumentDateField()
+	if f == nil {
+		return
+	}
+	// Регистронезависимый поиск: ключи Fields бывают и в PascalCase
+	// (formToFields / GetByID), и в lower-case (после Object.Set).
+	low := strings.ToLower(f.Name)
+	for k, v := range fields {
+		if strings.ToLower(k) != low {
 			continue
 		}
-		low := strings.ToLower(f.Name)
-		for k, v := range fields {
-			if strings.ToLower(k) != low {
-				continue
-			}
-			if t := runtime.AsTime(v); !t.IsZero() {
-				mc.SetPeriod(t)
-			}
-			break
+		if t := runtime.AsTime(v); !t.IsZero() {
+			mc.SetPeriod(t)
 		}
 		return
 	}
@@ -430,6 +430,9 @@ type SaveResult struct {
 // как err != nil (включая storage.ErrVersionConflict при !IsNew с конфликтом
 // версий — caller должен проверить errors.Is).
 func (s *Service) Save(ctx context.Context, req SaveRequest) (SaveResult, error) {
+	if err := storage.CheckWriteAllowed(ctx); err != nil {
+		return SaveResult{}, err
+	}
 	mc := runtime.NewMovementsCollector(req.Entity.Name, req.ID).WillPersist()
 	lockCollector := runtime.NewLockCollector()
 	defer lockCollector.ReleaseAll()
