@@ -83,7 +83,15 @@ func (s *Server) personalNavigationState(r *http.Request, sub string) (navigatio
 	state.BaseRevision = hex.EncodeToString(revision[:])
 	state.Renamed = []string{}
 	state.Origins = map[string]string{}
-	for id := range baseNodes {
+	desiredNodes := navigationEditorNodes(state.Desired)
+	inheritedNodes := navigationEditorNodes(state.layerBase)
+	visibleNodes := navigationEditorNodes(state.Base)
+	for id, title := range desiredNodes {
+		if _, inherited := inheritedNodes[id]; inherited {
+			visibleNodes[id] = title
+		}
+	}
+	for id := range visibleNodes {
 		state.Origins[id] = "configuration"
 	}
 	mark := func(setting storage.NavigationSettings, layer navigation.Layer, base navigation.Tree, source string) navigation.Delta {
@@ -102,7 +110,7 @@ func (s *Server) personalNavigationState(r *http.Request, sub string) (navigatio
 			if op.ID != "" {
 				id = op.ID
 			}
-			if _, visible := baseNodes[id]; visible {
+			if _, visible := visibleNodes[id]; visible {
 				state.Origins[id] = source
 			}
 		}
@@ -110,7 +118,6 @@ func (s *Server) personalNavigationState(r *http.Request, sub string) (navigatio
 	}
 	mark(adminSetting, navigation.AdminLayer, state.configuration, "common")
 	state.previous = mark(state.Setting, navigation.UserLayer, state.layerBase, "personal")
-	desiredNodes := navigationEditorNodes(state.Desired)
 	for id := range desiredNodes {
 		if strings.HasPrefix(id, "usr:") {
 			state.Origins[id] = "personal"
@@ -119,7 +126,7 @@ func (s *Server) personalNavigationState(r *http.Request, sub string) (navigatio
 	for _, op := range state.previous.Ops {
 		if op.Op == "rename" {
 			if _, visible := desiredNodes[op.Node]; visible {
-				if _, inherited := baseNodes[op.Node]; inherited {
+				if _, inherited := inheritedNodes[op.Node]; inherited {
 					state.Renamed = append(state.Renamed, op.Node)
 				}
 			}
@@ -295,17 +302,86 @@ func personalNavigationAfter(op navigation.Operation, nodes map[string]navigatio
 	return op
 }
 
+// A visible personal placement can keep an inherited container whose original
+// contents are all forbidden. Diff needs that known container, but its original
+// ancestors and their metadata must never be added to the public palette.
+func personalNavigationVisibleDelta(state navigationEditorState, desired navigation.Tree, editable map[string]string) (navigation.Delta, error) {
+	baseSections := map[string]navigation.Section{}
+	baseGroups := map[string]navigation.Group{}
+	for _, section := range state.Base.Sections {
+		baseSections[section.ID] = section
+		for _, group := range section.Groups {
+			baseGroups[group.ID] = group
+		}
+	}
+	current := navigationEditorNodes(state.Desired)
+	base := navigation.Tree{Version: state.Base.Version, Context: state.Base.Context, Sections: []navigation.Section{}}
+	wanted := desired
+	wanted.Sections = append([]navigation.Section(nil), desired.Sections...)
+	extra := map[string]bool{}
+	for _, full := range state.layerBase.Sections {
+		section, inBase := baseSections[full.ID]
+		_, inDesired := current[full.ID]
+		needed := inBase || inDesired
+		for _, group := range full.Groups {
+			if _, visible := current[group.ID]; visible {
+				needed = true
+			}
+		}
+		if !needed {
+			continue
+		}
+		if !inBase {
+			section = full
+			section.Items = nil
+		}
+		section.Groups = nil
+		for _, fullGroup := range full.Groups {
+			group, visible := baseGroups[fullGroup.ID]
+			if !visible {
+				if _, visible = current[fullGroup.ID]; !visible {
+					continue
+				}
+				group = fullGroup
+				group.Items = nil
+			}
+			section.Groups = append(section.Groups, group)
+		}
+		base.Sections = append(base.Sections, section)
+		if _, visible := editable[full.ID]; !visible {
+			// Keep this internal ancestor in wanted so Diff emits a hide for
+			// an omitted editable group, rather than hiding its unseen parent.
+			extra[full.ID] = true
+			ancestor := full
+			ancestor.Items, ancestor.Groups = nil, nil
+			wanted.Sections = append(wanted.Sections, ancestor)
+		}
+	}
+	delta, err := navigation.Diff(base, wanted, navigation.UserLayer)
+	if err != nil {
+		return navigation.Delta{}, err
+	}
+	ops := delta.Ops[:0]
+	for _, op := range delta.Ops {
+		if !extra[op.Node] {
+			ops = append(ops, op)
+		}
+	}
+	delta.Ops = ops
+	return delta, nil
+}
+
 // Replace editable intent while preserving valid previous intent for nodes
 // currently outside RBAC. Re-diffing the full result removes stale references
 // without turning the permitted projection into a persisted full snapshot.
 func personalNavigationDelta(state navigationEditorState, input navigationEditorRequest) (navigation.Delta, navigation.Tree, error) {
-	visible, err := navigation.Diff(state.Base, input.Desired, navigation.UserLayer)
-	if err != nil {
-		return navigation.Delta{}, navigation.Tree{}, err
-	}
 	editable := navigationEditorNodes(state.Base)
 	for id, title := range navigationEditorNodes(state.Desired) {
 		editable[id] = title
+	}
+	visible, err := personalNavigationVisibleDelta(state, input.Desired, editable)
+	if err != nil {
+		return navigation.Delta{}, navigation.Tree{}, err
 	}
 	known := navigationEditorNodes(state.layerBase)
 	for id, title := range navigationEditorNodes(state.effective) {
@@ -315,9 +391,49 @@ func personalNavigationDelta(state navigationEditorState, input navigationEditor
 	combined := navigation.Delta{Version: 1, BaseHash: hash, Ops: []navigation.Operation{}}
 	locations, _ := navigationEditorLocations(state.layerBase)
 	_, previousSiblings := navigationEditorLocations(state.effective)
+	currentLocations, currentSiblings := navigationEditorLocations(state.Desired)
+	wantedLocations, wantedSiblings := navigationEditorLocations(input.Desired)
+	predecessors := func(siblings map[navigationEditorLocation][]string) map[string]string {
+		result := map[string]string{}
+		for _, ids := range siblings {
+			previous := ""
+			for _, id := range ids {
+				result[id], previous = previous, id
+			}
+		}
+		return result
+	}
+	currentAfter, wantedAfter := predecessors(currentSiblings), predecessors(wantedSiblings)
+	retainedMoves := map[string]navigation.Operation{}
+	for _, op := range state.previous.Ops {
+		current, present := currentLocations[op.Node]
+		wanted, remains := wantedLocations[op.Node]
+		_, anchorEditable := editable[op.After]
+		if op.Op == "move" && op.After != "" && !anchorEditable && present && remains && current == wanted && current.parent == op.Parent && currentAfter[op.Node] == wantedAfter[op.Node] {
+			// An unchanged visible placement still follows its closed common
+			// sibling. The anchor is checked against the authoritative tree,
+			// never reintroduced into the client editing surface.
+			retainedMoves[op.Node] = op
+		}
+	}
 	for _, op := range visible.Ops {
+		if prior, present := retainedMoves[op.Node]; op.Op == "move" && present {
+			if locations[prior.After] == wantedLocations[op.Node] {
+				op.After = prior.After
+			}
+			delete(retainedMoves, op.Node)
+		}
 		combined.Ops = append(combined.Ops, op)
 		navigationEditorTrackLocation(locations, op)
+	}
+	// Diff may omit a move whose only difference was a now-closed sibling.
+	// Preserve such intent only while that sibling still has this destination.
+	for _, prior := range state.previous.Ops {
+		if op, present := retainedMoves[prior.Node]; present && locations[op.After] == wantedLocations[op.Node] {
+			combined.Ops = append(combined.Ops, op)
+			navigationEditorTrackLocation(locations, op)
+			delete(retainedMoves, prior.Node)
+		}
 	}
 	privateRenames := map[string]string{}
 	for _, op := range state.previous.Ops {
@@ -347,7 +463,7 @@ func personalNavigationDelta(state navigationEditorState, input navigationEditor
 	// Explicitly typing the inherited title is still a personal override, even
 	// when the current common title is equal. Preserve it across future renames.
 	wanted := navigationEditorNodes(input.Desired)
-	baseNodes := navigationEditorNodes(state.Base)
+	baseNodes := navigationEditorNodes(state.layerBase)
 	seen := map[string]bool{}
 	for _, id := range input.Renamed {
 		_, inherited := baseNodes[id]

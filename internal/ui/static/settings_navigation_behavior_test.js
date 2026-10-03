@@ -87,6 +87,23 @@ test('personal controller sends only its scope and retains explicit neutral rena
   assert.deepEqual(JSON.parse(ui.requests[1].options.body.get('renamed')), ['cfg:a','cfg:study']);
 });
 
+test('personal neutral rename includes inherited nodes visible only in desired', () => {
+  for (const inherited of ['cfg:study', 'adm:00000000-0000-4000-8000-000000000001']) {
+    const ui = setup('complete', data => {
+      Object.assign(data, {personal:true, path:'/ui/settings/navigation', ownedPrefix:'usr:', baseRevision:'hash', renamed:[]});
+      data.desired.sections[0].id = inherited;
+      data.base.sections.shift();
+    });
+    ui.choose(inherited);
+    const title = ui.elements['navigation-properties'].children[0].children[0];
+    title.value = 'Study'; title.fire('input');
+    ui.flush();
+    assert.deepEqual(JSON.parse(ui.requests[0].options.body.get('renamed')), [inherited]);
+    ui.elements['navigation-save'].fire('submit');
+    assert.deepEqual(JSON.parse(ui.requests[1].options.body.get('renamed')), [inherited]);
+  }
+});
+
 test('personal editor hides inherited administrator containers and removes only its own', () => {
   const adm = 'adm:00000000-0000-4000-8000-000000000001';
   const usr = 'usr:00000000-0000-4000-8000-000000000002';

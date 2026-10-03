@@ -51,7 +51,10 @@
       if (data.personal) document.getElementById('navigation-renamed').value = JSON.stringify(renameIntent());
     }
     function renameIntent() {
-      return Array.from(renamed).filter(function(id) { return find(id) && find(id, data.base); }).sort();
+      return Array.from(renamed).filter(function(id) { return find(id) && inherited(id); }).sort();
+    }
+    function inherited(id) {
+      return id.indexOf('cfg:') === 0 || id.indexOf('adm:') === 0;
     }
     function requestBody() {
       var body = new URLSearchParams({subsystem:data.subsystem, revision:data.revision, desired:JSON.stringify(desired)});
@@ -146,7 +149,7 @@
       var entry = find(selected); if (!entry) return;
       function field(name, input) { var container = element('label', name); container.appendChild(input); properties.appendChild(container); }
       var title = element('input'); title.type = 'text'; title.value = entry.node.title || ''; title.placeholder = label(entry.node);
-      title.addEventListener('input', function () { if(submitting)return; entry.node.title = title.value; delete entry.node.titles; if (entry.kind === 'section') entry.node.title_explicit = true; if (data.personal && find(entry.node.id, data.base)) renamed.add(entry.node.id); changed(entry.node.id, true); });
+      title.addEventListener('input', function () { if(submitting)return; entry.node.title = title.value; delete entry.node.titles; if (entry.kind === 'section') entry.node.title_explicit = true; if (data.personal && inherited(entry.node.id)) renamed.add(entry.node.id); changed(entry.node.id, true); });
       field(labels.title, title);
       var icon = element('select');
       [''].concat(data.icons || []).forEach(function (name) { var option = element('option', name || '—'); option.value = name; icon.appendChild(option); });

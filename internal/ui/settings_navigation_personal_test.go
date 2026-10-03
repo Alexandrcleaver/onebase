@@ -574,6 +574,209 @@ func TestPersonalNavigation_ClosedParentPreservesPersonalFolder(t *testing.T) {
 	}
 }
 
+func TestPersonalNavigation_VisiblePlacementInsideRevokedParent(t *testing.T) {
+	for _, scenario := range []string{"usr-folder", "section-items", "inherited-group", "moved-inherited-group", "hide-moved-group", "move-visible-out", "admin-hidden-anchor", "neutral-parent-rename"} {
+		t.Run(scenario, func(t *testing.T) {
+			dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+				f := schoolNavigationFixture(t, db, "testdata/navigation-school", true)
+				ctx := context.Background()
+				grant := &auth.Role{Name: "TemporaryClosedAccess"}
+				grant.Permissions.Catalogs = map[string][]string{"ClosedSentinel": {"read"}}
+				if err := f.server.authRepo.SyncRoles(ctx, []*auth.Role{grant}); err != nil {
+					t.Fatal(err)
+				}
+				alice, err := f.server.authRepo.GetByLogin(ctx, "alice")
+				if err != nil || alice == nil {
+					t.Fatal(err)
+				}
+				if err := f.server.authRepo.AssignRole(ctx, alice.ID, grant.ID); err != nil {
+					t.Fatal(err)
+				}
+				state := f.personalEditor(t, "alice", personalSchool)
+				academic := personalSection(t, &state, "cfg:academic-years")
+				public := academic.Items[0]
+				academic.Items = academic.Items[1:]
+				closed := personalSection(t, &state, "cfg:closed-sentinel-section")
+				private := closed.Groups[0].Items[0]
+				moved := scenario == "moved-inherited-group" || scenario == "hide-moved-group"
+				switch scenario {
+				case "section-items":
+					closed.Items = append(closed.Items, public)
+				case "inherited-group", "moved-inherited-group", "hide-moved-group", "move-visible-out", "admin-hidden-anchor":
+					closed.Groups[0].Items = append(closed.Groups[0].Items, public)
+					if moved {
+						group := closed.Groups[0]
+						closed.Groups = nil
+						state.Desired.Sections = append(state.Desired.Sections, navigation.Section{ID: "new:visible-root", Title: "Visible custom section", Groups: []navigation.Group{group}})
+						closed = personalSection(t, &state, "cfg:closed-sentinel-section")
+					}
+				default:
+					closed.Groups = append(closed.Groups, navigation.Group{ID: "new:visible-folder", Title: "Visible personal folder", Items: []navigation.Item{public}})
+				}
+				closed.Groups = append(closed.Groups, navigation.Group{ID: "new:hidden-intent", Title: "Hidden intent folder"})
+				personalSave(t, f, "alice", state)
+				state = f.personalEditor(t, "alice", personalSchool)
+				var privateFolderID, publicFolderID string
+				for _, section := range state.Desired.Sections {
+					for _, group := range section.Groups {
+						if group.Title == "Hidden intent folder" {
+							privateFolderID = group.ID
+						}
+						if group.Title == "Visible personal folder" {
+							publicFolderID = group.ID
+						}
+					}
+				}
+				if !strings.HasPrefix(privateFolderID, "usr:") {
+					t.Fatal("private intent identity missing")
+				}
+				if err := f.server.authRepo.UnassignRole(ctx, alice.ID, grant.ID); err != nil {
+					t.Fatal(err)
+				}
+				if rec := f.request(t, "GET", "/ui/catalog/closedsentinel", "alice", nil); rec.Code != 403 {
+					t.Fatal("closed direct URL", rec.Code)
+				}
+				if rec := f.request(t, "GET", "/ui/catalog/"+url.PathEscape(strings.ToLower("УчебныеГоды")), "alice", nil); rec.Code != 200 {
+					t.Fatal("accessible direct URL", rec.Code)
+				}
+				admin := f.editor(t, personalSchool)
+				closed = personalSection(t, &admin, "cfg:closed-sentinel-section")
+				closed.Title = "NEW_PARENT_SENTINEL"
+				closed.Groups[0].Title = "New common group"
+				if scenario == "admin-hidden-anchor" {
+					closed.Groups[0].Items = nil
+				}
+				if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, admin)); rec.Code != 303 {
+					t.Fatal("common rename", rec.Code)
+				}
+				checkPrivate := func(rec *httptest.ResponseRecorder) {
+					t.Helper()
+					if rec.Code != 200 {
+						t.Error("permitted response", rec.Code)
+					}
+					for _, token := range []string{"ClosedSentinel", "cfg:closed-sentinel-item", "SECRET_METADATA_SENTINEL"} {
+						if strings.Contains(rec.Body.String(), token) {
+							t.Error("closed target leaked", token)
+						}
+					}
+					if moved {
+						for _, token := range []string{"cfg:closed-sentinel-section", "NEW_PARENT_SENTINEL", privateFolderID, "Hidden intent folder"} {
+							if strings.Contains(rec.Body.String(), token) {
+								t.Error("closed original ancestor leaked", token)
+							}
+						}
+					}
+				}
+				checkPrivate(f.request(t, "GET", "/ui/settings/navigation?subsystem="+url.QueryEscape(personalSchool), "alice", nil))
+				checkPrivate(f.request(t, "GET", "/ui?subsystem="+url.QueryEscape(personalSchool), "alice", nil))
+				// The server may know extra ancestors internally, but they and
+				// closed targets must remain unavailable to client input.
+				for _, action := range []string{"preview", "save"} {
+					forged := f.personalEditor(t, "alice", personalSchool)
+					academic = personalSection(t, &forged, "cfg:academic-years")
+					academic.Items = append(academic.Items, private)
+					if rec := f.request(t, "POST", "/ui/settings/navigation/"+action, "alice", personalNavigationForm(t, forged)); rec.Code != 400 {
+						t.Error("closed target forgery accepted", action, rec.Code)
+					}
+					if moved {
+						forged = f.personalEditor(t, "alice", personalSchool)
+						forged.Desired.Sections = append(forged.Desired.Sections, navigation.Section{ID: "cfg:closed-sentinel-section", Title: "Forged original ancestor"})
+						if rec := f.request(t, "POST", "/ui/settings/navigation/"+action, "alice", personalNavigationForm(t, forged)); rec.Code != 400 {
+							t.Error("closed ancestor forgery accepted", action, rec.Code)
+						}
+					}
+				}
+				state = f.personalEditor(t, "alice", personalSchool)
+				personalSection(t, &state, "cfg:academic-years").Icon = "book-open"
+				if scenario == "move-visible-out" {
+					personalGroupByID(t, &state, "cfg:closed-sentinel-group").Items = nil
+					academic = personalSection(t, &state, "cfg:academic-years")
+					academic.Items = append(academic.Items, public)
+				}
+				if scenario == "hide-moved-group" {
+					for i := range state.Desired.Sections {
+						section := &state.Desired.Sections[i]
+						if section.Title == "Visible custom section" {
+							section.Groups = nil
+						}
+					}
+				}
+				if scenario == "neutral-parent-rename" {
+					state.Renamed = []string{"cfg:closed-sentinel-section"}
+				}
+				checkPrivate(f.request(t, "POST", "/ui/settings/navigation/preview", "alice", personalNavigationForm(t, state)))
+				if rec := f.request(t, "POST", "/ui/settings/navigation/save", "alice", personalNavigationForm(t, state)); rec.Code != 303 {
+					t.Errorf("fresh visible save: %d", rec.Code)
+				}
+				if scenario == "neutral-parent-rename" {
+					state = f.personalEditor(t, "alice", personalSchool)
+					found := false
+					for _, id := range state.Renamed {
+						found = found || id == "cfg:closed-sentinel-section"
+					}
+					if !found || state.Origins["cfg:closed-sentinel-section"] != "personal" {
+						t.Error("explicit inherited intent/provenance missing")
+					}
+					admin = f.editor(t, personalSchool)
+					personalSection(t, &admin, "cfg:closed-sentinel-section").Title = "Next common parent"
+					if rec := f.request(t, "POST", "/ui/admin/navigation/save", "admin", navigationForm(t, admin)); rec.Code != 303 {
+						t.Fatal("second common rename", rec.Code)
+					}
+					state = f.personalEditor(t, "alice", personalSchool)
+					if personalSection(t, &state, "cfg:closed-sentinel-section").Title != "NEW_PARENT_SENTINEL" {
+						t.Error("neutral rename did not override later common title")
+					}
+					personalSave(t, f, "alice", state)
+				}
+				if err := f.server.authRepo.AssignRole(ctx, alice.ID, grant.ID); err != nil {
+					t.Fatal(err)
+				}
+				state = f.personalEditor(t, "alice", personalSchool)
+				if personalSection(t, &state, "cfg:academic-years").Icon != "book-open" {
+					t.Error("visible edit was not persisted")
+				}
+				if scenario != "admin-hidden-anchor" && personalGroupByID(t, &state, privateFolderID).Title != "Hidden intent folder" {
+					t.Error("private intent folder was not restored")
+				}
+				if scenario == "hide-moved-group" {
+					raw, err := json.Marshal(state.Desired)
+					if err != nil || strings.Contains(string(raw), "cfg:closed-sentinel-group") || strings.Contains(string(raw), public.ID) {
+						t.Error("explicit group hide lost after regrant", err)
+					}
+				} else if scenario == "move-visible-out" {
+					items := personalSection(t, &state, "cfg:academic-years").Items
+					if len(items) != 1 || items[0].ID != public.ID {
+						t.Error("visible move replaced by private anchor", items)
+					}
+				} else if scenario == "admin-hidden-anchor" {
+					// A common deletion makes the old move's anchor stale before
+					// editing. Regrant must not revive the deleted target; the
+					// accessible item keeps its authoritative fallback placement.
+					raw, err := json.Marshal(state.Desired)
+					if err != nil || strings.Contains(string(raw), private.ID) || !strings.Contains(string(raw), public.ID) {
+						t.Error("common-hidden anchor resurrected or accessible item lost", err)
+					}
+				} else if scenario == "section-items" {
+					items := personalSection(t, &state, "cfg:closed-sentinel-section").Items
+					if len(items) != 1 || items[0].ID != public.ID {
+						t.Error("direct section placement lost", items)
+					}
+				} else if publicFolderID != "" {
+					items := personalGroupByID(t, &state, publicFolderID).Items
+					if len(items) != 1 || items[0].ID != public.ID {
+						t.Error("personal folder placement lost", items)
+					}
+				} else {
+					items := personalGroupByID(t, &state, "cfg:closed-sentinel-group").Items
+					if len(items) != 2 || items[0].ID != private.ID || items[1].ID != public.ID {
+						t.Error("inherited group placement/order lost", items)
+					}
+				}
+			})
+		})
+	}
+}
+
 func TestPersonalNavigation_PrivatePlacementWithAccessibleAnchor(t *testing.T) {
 	for _, scenario := range []struct {
 		name string
