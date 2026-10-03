@@ -513,21 +513,18 @@ func templateFuncs(bundle *i18n.Bundle) template.FuncMap {
 		// полной перезагрузки страницы: «Записать» уходит POST'ом с редиректом, и
 		// иначе выбор в реквизите формы просто пропадал (в 1С форма живёт в
 		// памяти клиента и реквизиты переживают запись).
-		"formAttrNames": func(form *metadata.FormModule, entity *metadata.Entity) []string {
-			if form == nil {
-				return nil
-			}
-			var names []string
-			for _, a := range form.Attributes {
-				if a == nil || a.Name == "" || a.MainAttribute || a.TypeRef == "ValueTable" {
-					continue
+		"formAttrNames": formAttrNames,
+		"formAttrValues": func(form *metadata.FormModule, entity *metadata.Entity, values any) map[string]string {
+			initial := make(map[string]string)
+			for _, name := range formAttrNames(form, entity) {
+				// Values uses the same string representation as rendered controls.
+				if vals, ok := values.(map[string]string); ok {
+					initial[name] = vals[name]
+				} else {
+					initial[name] = formValueForPath(values, "Форма."+name)
 				}
-				if _, isEntityField := entityFieldByName(entity, a.Name); isEntityField {
-					continue
-				}
-				names = append(names, a.Name)
 			}
-			return names
+			return initial
 		},
 		// fieldTitleRU достаёт ru-вариант из map[string]string или возвращает fallback.
 		"fieldTitleRU": func(m map[string]string, fallback string) string {

@@ -199,6 +199,25 @@ window.obManagedApplyTablePartRefOptions = obManagedApplyTablePartRefOptions;
   // ровно на время перезагрузки: пишем перед отправкой, применяем и СРАЗУ
   // удаляем при следующей загрузке — дольше одной навигации они не живут.
   var FORM_ATTRS = Array.isArray(cfg.formAttrs) ? cfg.formAttrs : [];
+  // An attribute without a placed control still lives for the open form.
+  // Carry it through the same FormData/applyValues path as visible attributes;
+  // values are client input, never an authorization boundary.
+  function ensureFormAttrControls(){
+    var form = document.getElementById('main-form');
+    if (!form) return;
+    var initial = cfg.formAttrValues || {};
+    for (var i = 0; i < FORM_ATTRS.length; i++) {
+      var name = FORM_ATTRS[i];
+      if (form.querySelector('[name="' + (window.CSS && CSS.escape ? CSS.escape(name) : name) + '"]')) continue;
+      var input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = name;
+      var value = Object.prototype.hasOwnProperty.call(initial, name) ? initial[name] : '';
+      input.value = value == null ? '' : String(value);
+      form.appendChild(input);
+    }
+  }
+  obManagedReady(ensureFormAttrControls);
   var ATTR_STASH_KEY = 'ob-form-attrs:' + String(cfg.entity || '');
   function stashFormAttrs(){
     if (!FORM_ATTRS.length) return;
