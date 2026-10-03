@@ -183,6 +183,24 @@ func (s *Server) choicePredicates(ctx context.Context, owner *metadata.Entity, f
 			predicates = append(predicates, predicate)
 			continue
 		}
+		if literal := strings.TrimSpace(condition.Ref); literal != "" {
+			id, err := uuid.Parse(literal)
+			if err != nil || id == uuid.Nil {
+				// onebase check такое не пропускает; рантайм всё равно не
+				// превращает битую константу в «условие без значения».
+				return nil, false, fmt.Errorf("invalid choice ref")
+			}
+			visible, err := s.choiceRefVisible(ctx, target, fieldName, id)
+			if err != nil {
+				return nil, false, err
+			}
+			if !visible {
+				return nil, true, nil
+			}
+			predicate.Value = id
+			predicates = append(predicates, predicate)
+			continue
+		}
 		path := strings.TrimSpace(condition.From)
 		raw := strings.TrimSpace(sources[path])
 		if raw == "" {
@@ -279,6 +297,42 @@ func (s *Server) deepChoiceSourceValue(ctx context.Context, owner *metadata.Enti
 		return nil, false, nil
 	}
 	return target, true, nil
+}
+
+// choiceRefVisible — существует ли запись постоянной ссылки условия (ref,
+// #1820) и видна ли она пользователю. Справочник записи — тот, на который
+// ссылается реквизит цели; для parent_id — сама цель.
+//
+// false даёт пустую выдачу при ЛЮБОМ операторе (fail-closed): записи нет в
+// этой базе (справочник заведён не из той 1С), она удалена или закрыта
+// строковым доступом. Иначе «исключить архивную папку» без самой папки
+// раскрыло бы весь справочник, а «только из папки» — показало бы не то. Причины
+// в ответе не различаются: пустой подбор не должен рассказывать, существует ли
+// запись. Проверка — тот же гейт, что у selected_allowed (чтение справочника и
+// допуск строки); группы включены: постоянная ссылка обычно указывает на папку.
+func (s *Server) choiceRefVisible(ctx context.Context, target *metadata.Entity, fieldName string, id uuid.UUID) (bool, error) {
+	refName := ""
+	if field, ok := entityFieldByName(target, fieldName); ok {
+		refName = strings.TrimSpace(field.RefEntity)
+	} else if strings.EqualFold(fieldName, metadata.FormChoiceParentField) {
+		if parent := metadata.FormChoiceParentFieldOf(target); parent != nil {
+			refName = parent.RefEntity
+		}
+	}
+	refEntity := s.reg.GetEntity(refName)
+	if refEntity == nil {
+		return false, fmt.Errorf("choice ref field %q is not a reference", fieldName)
+	}
+	// Запрет чтения справочника ссылки — для пользователя записи нет (пустой
+	// подбор); техническая ошибка решения — ошибка запроса, а не тихая пустота.
+	decision, err := s.rowDecision(ctx, refEntity, "read")
+	if err != nil {
+		return false, err
+	}
+	if !decision.Allowed {
+		return false, nil
+	}
+	return s.choiceSelectedAllowed(ctx, refEntity, id, nil, true)
 }
 
 // choiceTargetFieldIsString — строковый нессылочный ли реквизит

@@ -2006,7 +2006,8 @@ const tplList = `
 
 {{$obRefresh := liveListRefreshOn .Entity}}
 <div class="ob-list-wrap">
-<div class="card" data-ob-live="{{lower (str .Entity.Kind)}}/{{lower .Entity.Name}}"{{if $obRefresh}} data-ob-refresh-on="{{$obRefresh}}"{{end}}>
+<div class="ob-list-content" data-ob-live="{{lower (str .Entity.Kind)}}/{{lower .Entity.Name}}"{{if $obRefresh}} data-ob-refresh-on="{{$obRefresh}}"{{end}}>
+<div class="card">
 {{if .TreeView}}
 {{/* ===== TREE VIEW ===== */}}
 {{if .TreeRows}}
@@ -2172,8 +2173,6 @@ const tplList = `
 {{end}}
 {{end}}
 </div>
-{{template "detail-panel" .}}
-</div>
 {{if and .Feed (not .TreeView)}}
 {{/* Лента: догрузка по скроллу. Без JS «Показать ещё» = переход на след. страницу. */}}
 {{if .HasNext}}
@@ -2191,6 +2190,9 @@ const tplList = `
 {{else if gt .Total 0}}
 <div style="color:#94a3b8;font-size:12px;margin-top:8px">{{t $.Lang "Всего:"}} {{.Total}}</div>
 {{end}}
+</div>
+{{template "detail-panel" .}}
+</div>
 </main>
 <script type="application/json" id="ob-list-config">{{jsJSON (dict
   "isAdmin" .IsAdmin
@@ -2836,6 +2838,7 @@ const tplRegister = `
 {{define "reg-filter-form"}}
 {{- $flt := .Filter}}{{$refOpts := .RefOpts}}
 <form method="get" style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:12px">
+  {{listHidden .Context}}
   {{range .Fields}}
   <div style="display:flex;flex-direction:column;gap:2px">
     <label style="font-size:11px;color:#64748b">{{.DisplayName $.Lang}}</label>
@@ -3348,7 +3351,7 @@ const tplInfoReg = `
     {{if .CanWrite}}<a class="btn" href="/ui/inforeg/{{lower .InfoReg.Name}}/new">+ {{t $.Lang "Добавить запись"}}</a>{{end}}
   </div>
 </div>
-{{template "reg-filter-form" (dict "Fields" .InfoReg.Dimensions "Filter" .Filter "RefOpts" .RefOpts "ShowFromTo" .InfoReg.Periodic "ShowToOnly" false "HasFilters" .HasFilters "ResetURL" (printf "/ui/inforeg/%s" (lower .InfoReg.Name)) "Lang" $.Lang)}}
+{{template "reg-filter-form" (dict "Fields" .InfoReg.Dimensions "Filter" .Filter "RefOpts" .RefOpts "ShowFromTo" .InfoReg.Periodic "ShowToOnly" false "HasFilters" .HasFilters "ResetURL" .ResetURL "Context" .FilterContext "Lang" $.Lang)}}
 <div style="margin-bottom:8px">{{template "detail-panel-toggle" .}}</div>
 <div class="ob-list-wrap">
 <div class="card">
@@ -3365,7 +3368,7 @@ const tplInfoReg = `
   {{range $.InfoReg.Dimensions}}<td>{{$lbl := index $row (printf "%s_label" .Name)}}{{if $lbl}}{{$lbl}}{{else}}{{index $row .Name}}{{end}}</td>{{end}}
   {{range $.InfoReg.Resources}}<td style="font-weight:600">{{$lbl := index $row (printf "%s_label" .Name)}}{{if $lbl}}{{$lbl}}{{else}}{{index $row .Name}}{{end}}</td>{{end}}
   {{if $.CanDelete}}<td>
-    <form method="POST" action="/ui/inforeg/{{lower $.InfoReg.Name}}/delete" style="display:inline"
+    <form method="POST" action="{{$.DeleteURL}}" style="display:inline"
           data-ob-confirm="{{t $.Lang "Удалить запись?"}}">
       {{if $.InfoReg.Periodic}}<input type="hidden" name="period" value="{{index $row "period_key"}}">{{end}}
       {{range $.InfoReg.Dimensions}}<input type="hidden" name="{{.Name}}" value="{{infoRegKeyValue . $row}}">{{end}}
@@ -3377,7 +3380,14 @@ const tplInfoReg = `
 {{else}}<p class="empty">{{t $.Lang "Записей нет"}}</p>{{end}}
 </div>
 {{template "detail-panel" .}}
-</div></main></div></body></html>
+</div>
+<div data-ob-inforeg-pagination style="display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap">
+  <span>{{t $.Lang "Всего:"}} {{.Total}}</span>
+  {{if .HasPrev}}<a class="btn btn-secondary btn-sm" rel="prev" href="{{.PrevURL}}">{{t $.Lang "← Назад"}}</a>{{end}}
+  <span style="color:#64748b;font-size:13px">{{t $.Lang "Стр."}} {{.Page}} {{t $.Lang "из"}} {{.TotalPages}}</span>
+  {{if .HasNext}}<a class="btn btn-secondary btn-sm" rel="next" href="{{.NextURL}}">{{t $.Lang "Вперёд →"}}</a>{{end}}
+</div>
+</main></div></body></html>
 {{end}}
 
 {{define "page-inforeg-form"}}
