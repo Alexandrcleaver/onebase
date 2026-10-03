@@ -69,11 +69,14 @@
 из проекции остатков, поэтому такие регистры считаются на лету. Снять ограничение —
 это развитие плана 80, а не исправление ошибки.
 
-**Ограничение движка, вскрытое при работе над Д2:** точный денежный агрегат на
-SQLite недостижим — `SUM()` над TEXT-колонкой возвращает `float64` при любом
-`CAST` (проверено на `NUMERIC` и `DECIMAL(38,10)`). `decimal` даёт точность на
-PostgreSQL; для SQLite потребовалось бы суммирование в Go — отдельное решение
-с влиянием на производительность.
+**Ограничение движка, вскрытое при работе над Д2:** встроенный `SUM()` SQLite
+над TEXT-колонкой возвращает `float64` при любом `CAST` (проверено на `NUMERIC`
+и `DECIMAL(38,10)`). `decimal` даёт точность на PostgreSQL. **Снято 29.09.2026:**
+встроенный `sum()` на SQLite перекрыт точной десятичной суммой в Go
+(`internal/storage/sqlite_sum.go`) — одной регистрацией для всех запросов,
+виртуальных таблиц, итогов и проверок doctor. Цена — около 1 мкс на строку
+агрегата; вычисления внутри SQL до суммирования (`Количество * Цена`) остаются
+в double.
 
 ### Текущий приоритет
 
@@ -426,7 +429,7 @@ PostgreSQL; для SQLite потребовалось бы суммировани
 | 165 | [165-standard-field-canonical-storage-and-id-recovery.md](165-standard-field-canonical-storage-and-id-recovery.md) | Каноничное хранение стандартных «Кода»/«Номера» в `numerator.field` и атомарное восстановление `std_code`/`std_number` без DDL (#1358, #1359) | ~6–8.5 дней | 📋 Проектирование |
 | 167 | [167-multiline-plain-text-fields.md](167-multiline-plain-text-fields.md) | Многострочный обычный `string`: field-level `multiline`, наследование и override в managed-форме, `height` в строках, автоформы сущности и регистра сведений (#1390) | ~4.5–6 дней | 📋 Проектирование |
 | 168 | [168-choice-preview-context.md](168-choice-preview-context.md) | Пояснение в форме выбора: статический реквизит, пакетная DSL-функция и ограниченный контекст вызывающей формы с RBAC (#1391) | ~5.5–8 дней | 📋 Проект 2026-09-08 |
-| 169 | [169-semantic-navigation-settings.md](169-semantic-navigation-settings.md) | Смысловое mixed-kind меню: YAML-база, общая настройка администратора и персональная дельта пользователя с безопасным наследованием (#1362) | ~13–19 дней после bootstrap плана 163 | 📋 Проект 2026-09-08 |
+| 169 | [169-semantic-navigation-settings.md](169-semantic-navigation-settings.md) | Смысловое mixed-kind меню: YAML-база, общая настройка администратора и персональная дельта пользователя с безопасным наследованием (#1362) | ~13–19 дней после bootstrap плана 163 | ✅ Реализован срезами A–F, 2026-10-02 |
 | 170 | [170-dependent-reference-choice-filters.md](170-dependent-reference-choice-filters.md) | Зависимый отбор ссылочного picker: server-authoritative `eq`, `in_hierarchy`, `is_folder`, одинаковый `List`/`CountList` и защита от stale browser responses (#1303) | ~6–8 дней | 📋 Проектирование |
 | 172 | [172-managed-form-runtime-structure.md](172-managed-form-runtime-structure.md) | Динамическая структура managed-форм: `ЭтаФорма.Элементы`, серверный instance/revision, безопасные DOM-патчи и lifecycle SlickGrid (#1263) | ~12–17 дней | 📋 Проектирование |
 | 178 | [178-attachment-link-mode.md](178-attachment-link-mode.md) | Вложения: режим `link` — платформа хранит путь, а не копию; открытие файла в программе ОС на стороне клиента, выбор режима на уровне базы и сущности, открытие из списка и inline-просмотр хранимых вложений (заявка #1480) | ~11 дней | 📋 Проектирование |
@@ -449,20 +452,29 @@ PostgreSQL; для SQLite потребовалось бы суммировани
 
 | № | Файл | Фича | Эстимейт | Статус |
 |---|---|---|---|---|
+| 196 | [196-pr-identity-and-fork-isolation.md](196-pr-identity-and-fork-isolation.md) | Identity-bound REVIEW/FIX/MERGE/TAIL и безопасный fork-маршрут: repository/ref/SHA lease, exact fetch, доверенный CI без локального исполнения fork-кода (#1245) | ~10–16 дней | 📋 Проектирование |
 | 163 | [163-next-slice-handoff.md](163-next-slice-handoff.md) | Crash-safe handoff между последовательными PR-срезами одной issue: committed merge boundary, уникальный branch-claim, recovery и наблюдаемость (#1379) | ~10–15 дней | 📋 Проектирование |
 | 180 | [180-base-sync-head-transition-proof.md](180-base-sync-head-transition-proof.md) | Доказательство перехода HEAD при base-sync без зависимости от даты commit: точный to, CAS, recovery и миграция carry (#1561) | ~7–11 дней | 📋 Проектирование |
+| 195 | [195-review-technical-handoff.md](195-review-technical-handoff.md) | Типизированные блокеры REVIEW, конечный технический handoff под флагом и отдельные продуктовые/инженерные статусы в OneBase и PromptPilot (#1836) | ~11–17 дней | 📋 Проектирование |
 
 ### Направление У — надёжность развёртывания и восстановления
 
 | № | Файл | Фича | Эстимейт | Статус |
 |---|---|---|---|---|
 | 166 | [166-durable-files-and-clean-restore-rollback.md](166-durable-files-and-clean-restore-rollback.md) | Долговечный каталог файлов PostgreSQL без temp-fallback и чистый rollback/FK при ошибке `DemoReset`; независимая маршрутизация остальных регрессий #1268 | ~2–3 дня для ведущего среза | 📋 Проектирование |
+| 184 | [184-mode-aware-files-root-and-recovery.md](184-mode-aware-files-root-and-recovery.md) | PostgreSQL без обязательного home для db/S3: проверяемый disk root по операции, отдельные временные копии S3 и единое открытие recovery (#1523, #1525) | ~6–9 дней | 📋 Проектирование |
 
 ### Направление У — совместимость встроенного языка 1С
 
 | № | Файл | Фича | Эстимейт | Статус |
 |---|---|---|---|---|
 | 173 | [173-dynamic-new-constructor.md](173-dynamic-new-constructor.md) | Динамический конструктор `Новый(<Тип>, <Параметры>)`: явный AST, общий runtime-dispatch, массив параметров и сквозная regression #1366 | ~2.5–3.5 дня | 📋 Проектирование |
+
+### Направление Ф — корректность запросов и пустые значения
+
+| № | Файл | Фича | Эстимейт | Статус |
+|---|---|---|---|---|
+| 185 | [185-query-empty-values-and-indexes.md](185-query-empty-values-and-indexes.md) | Общий план для #1534, #1535 и #1183: индексируемый положительный отбор, типы источников, явный контракт `В` | ~7–11 дней | 📋 Проектирование |
 
 ## Граф зависимостей (архив)
 

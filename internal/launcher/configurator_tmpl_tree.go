@@ -1128,6 +1128,7 @@ const cfgTabTree = `{{define "tab-tree"}}
   <div class="cfg-panel" id="sub-{{$sub.Name}}">
     <div class="panel-title">🗂 {{$sub.Title}}</div>
     <div class="panel-kind">{{t $.Lang "Подсистема"}}</div>
+    <p><a class="btn" href="/bases/{{$.Base.ID}}/configurator/navigation?subsystem={{$sub.Name}}">{{t $.Lang "Редактор меню"}}</a></p>
     <form method="POST" action="/bases/{{$.Base.ID}}/configurator/subsystem" data-home-key="sub-{{$sub.Name}}">
       <input type="hidden" name="subsystem_name" value="{{$sub.Name}}">
       <div class="fg" style="margin-top:12px">
@@ -1361,6 +1362,7 @@ const cfgTabTree = `{{define "tab-tree"}}
   <div class="cfg-panel" id="home-page">
     <div class="panel-title">🏠 {{t $.Lang "Главная страница"}}</div>
     <div class="panel-kind">{{t $.Lang "Раскладка стартового дашборда"}} (<code>config/home_page.yaml</code>)</div>
+    <p><a class="btn" href="/bases/{{.Base.ID}}/configurator/navigation">{{t $.Lang "Редактор меню"}}</a></p>
     <form method="POST" action="/bases/{{.Base.ID}}/configurator/home-page" data-home-key="home">
       <div class="fg" style="margin-top:12px">
         <label>{{t $.Lang "Заголовок"}}</label>
@@ -1521,6 +1523,21 @@ const cfgTabTree = `{{define "tab-tree"}}
   </label>
   <div style="color:#94a3b8;font-size:11px;margin-left:24px;margin-top:2px">
     После включения требуется миграция БД: появятся колонки <code>is_folder</code> и <code>parent_id</code>.
+  </div>
+</div>
+<div style="margin-bottom:10px">
+  <input type="hidden" name="owner_present" value="1">
+  <label style="display:block;font-size:13px;margin-bottom:4px">{{t $.Lang "Подчинён справочнику (владелец)"}}</label>
+  <select name="owner" style="padding:5px 6px;border:1px solid #ccd0d8;border-radius:3px;font-size:13px;min-width:260px">
+    <option value="">{{t $.Lang "— самостоятельный —"}}</option>
+    {{range $c := $.Catalogs}}{{if ne $c.Name $e.Name}}
+    <option value="{{$c.Name}}" {{if eq $e.Owner $c.Name}}selected{{end}}>{{$c.Name}}</option>
+    {{end}}{{end}}
+  </select>
+  <div style="color:#94a3b8;font-size:11px;margin-top:2px">
+    {{t $.Lang "Как в 1С, у элемента появляется реквизит «Владелец»."}}
+    {{t $.Lang "При подборе показываются только элементы выбранного владельца. Настраивать отбор на формах не нужно."}}
+    {{t $.Lang "После включения требуется миграция БД: появится колонка"}} <code>владелец_id</code>.
   </div>
 </div>
 <details {{if $e.Activity}}open{{end}} style="margin-bottom:10px">
