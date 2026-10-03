@@ -148,18 +148,15 @@ func replaceFile(path string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(temp.Name())
+	defer func() { _ = os.Remove(temp.Name()) }()
 	if err := temp.Chmod(info.Mode().Perm()); err != nil {
-		temp.Close()
-		return err
+		return errors.Join(err, temp.Close())
 	}
 	if _, err := temp.Write(content); err != nil {
-		temp.Close()
-		return err
+		return errors.Join(err, temp.Close())
 	}
 	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
+		return errors.Join(err, temp.Close())
 	}
 	if err := temp.Close(); err != nil {
 		return err
