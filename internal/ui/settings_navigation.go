@@ -19,20 +19,30 @@ import (
 const maxNavigationFormBytes = 2 << 20
 
 // navigationEditorRequest carries a desired layout, never a SQL key or a delta.
-// The administrator's handler selects the scope and derives changes on the server.
+// The authenticated handler selects the scope and derives changes on the server.
 type navigationEditorRequest struct {
-	Subsystem string          `json:"subsystem"`
-	Revision  string          `json:"revision"`
-	Desired   navigation.Tree `json:"desired"`
+	Subsystem    string          `json:"subsystem"`
+	Revision     string          `json:"revision"`
+	Desired      navigation.Tree `json:"desired"`
+	BaseRevision string          `json:"base_revision"`
+	Renamed      []string        `json:"renamed"`
 }
 
 type navigationEditorState struct {
-	Base        navigation.Tree
-	Desired     navigation.Tree
-	Setting     storage.NavigationSettings
-	Diagnostics []navigation.Diagnostic
-	Configured  bool
-	Flat        bool
+	Base          navigation.Tree
+	Desired       navigation.Tree
+	Setting       storage.NavigationSettings
+	Diagnostics   []navigation.Diagnostic
+	Configured    bool
+	Flat          bool
+	Personal      bool
+	BaseRevision  string
+	Renamed       []string
+	Origins       map[string]string
+	configuration navigation.Tree
+	layerBase     navigation.Tree
+	effective     navigation.Tree
+	previous      navigation.Delta
 }
 
 func (s *Server) navigationEditorState(r *http.Request, sub string) (navigationEditorState, error) {
@@ -90,6 +100,14 @@ func (s *Server) adminNavigation(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) renderNavigationEditor(w http.ResponseWriter, r *http.Request, state navigationEditorState, sub, message string, status int) {
 	lang := s.resolveLang(r)
+	path, ownedPrefix := "/ui/admin/navigation", "adm:"
+	title, description := "Настройка приложения", "Общая настройка базы. Изменения меню видны всем пользователям с учётом их прав."
+	resetConfirm, resetLabel := "Сбросить общую настройку к конфигурации?", "Сбросить к конфигурации"
+	if state.Personal {
+		path, ownedPrefix = "/ui/settings/navigation", "usr:"
+		title, description = "Мои настройки", "Личная настройка меню. Неизменённые узлы наследуют общую настройку базы."
+		resetConfirm, resetLabel = "Сбросить личную настройку к общей?", "Сбросить к общей настройке"
+	}
 	labels := map[string]string{}
 	for key, value := range map[string]string{
 		"up": "Выше", "down": "Ниже", "in": "Внутрь папки", "out": "Из папки",
@@ -103,10 +121,18 @@ func (s *Server) renderNavigationEditor(w http.ResponseWriter, r *http.Request, 
 	} {
 		labels[key] = s.tr(lang, value)
 	}
+	labels["reset"] = s.tr(lang, resetConfirm)
+	for key, value := range map[string]string{"configuration": "Конфигурация", "common": "Общая настройка", "personal": "Моя настройка"} {
+		labels[key] = s.tr(lang, value)
+	}
 	bootstrap := map[string]any{
 		"base": state.Base, "desired": state.Desired, "subsystem": sub,
 		"revision": state.Setting.Revision, "labels": labels, "icons": LucideNames(),
-		"preview": navigationPreview(s.navigationGroups(r, state.Desired, state.Base, state.Configured, state.Flat, sub)),
+		"preview":  s.editorNavigationPreview(r, state, sub),
+		"personal": state.Personal, "ownedPrefix": ownedPrefix, "path": path,
+	}
+	if state.Personal {
+		bootstrap["baseRevision"], bootstrap["renamed"], bootstrap["origins"] = state.BaseRevision, state.Renamed, state.Origins
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
@@ -115,7 +141,18 @@ func (s *Server) renderNavigationEditor(w http.ResponseWriter, r *http.Request, 
 		"NavigationEditor": bootstrap, "NavigationRevision": state.Setting.Revision,
 		"NavigationSubsystem": sub, "NavigationDiagnostics": state.Diagnostics,
 		"NavigationMessage": message, "NavigationSaved": r.URL.Query().Get("saved") != "",
+		"NavigationPersonal": state.Personal, "NavigationPath": path, "NavigationTitle": title,
+		"NavigationDescription": description, "NavigationResetConfirm": resetConfirm, "NavigationResetLabel": resetLabel,
+		"NavigationBaseRevision": state.BaseRevision,
 	})
+}
+
+func (s *Server) editorNavigationPreview(r *http.Request, state navigationEditorState, sub string) []NavigationPreviewSection {
+	base, desired := state.Base, state.Desired
+	if state.Personal {
+		base, desired = state.configuration, state.effective
+	}
+	return navigationPreview(s.navigationGroups(r, desired, base, state.Configured, state.Flat, sub))
 }
 
 func (s *Server) navigationEditorError(w http.ResponseWriter, r *http.Request, status int, key string) {
@@ -125,13 +162,18 @@ func (s *Server) navigationEditorError(w http.ResponseWriter, r *http.Request, s
 // Fields are taken only from the POST body. URL query parameters, login and SQL
 // key never choose a storage scope. MaxBytesReader bounds form and JSON parsing.
 func readNavigationEditorRequest(w http.ResponseWriter, r *http.Request, treeRequired bool) (navigationEditorRequest, error) {
+	return readNavigationEditorRequestMode(w, r, treeRequired, false)
+}
+
+func readNavigationEditorRequestMode(w http.ResponseWriter, r *http.Request, treeRequired, personal bool) (navigationEditorRequest, error) {
 	var input navigationEditorRequest
 	r.Body = http.MaxBytesReader(w, r.Body, maxNavigationFormBytes)
 	if err := r.ParseForm(); err != nil {
 		return input, err
 	}
 	for key, values := range r.PostForm {
-		if len(values) != 1 || key != "subsystem" && key != "revision" && key != "desired" {
+		allowed := key == "subsystem" || key == "revision" || key == "desired" || personal && treeRequired && (key == "base_revision" || key == "renamed")
+		if len(values) != 1 || !allowed {
 			return input, fmt.Errorf("unexpected form field")
 		}
 	}
@@ -141,6 +183,22 @@ func readNavigationEditorRequest(w http.ResponseWriter, r *http.Request, treeReq
 	}
 	if !treeRequired {
 		return input, nil
+	}
+	if personal {
+		input.BaseRevision = r.PostForm.Get("base_revision")
+		if input.BaseRevision == "" || !utf8.ValidString(r.PostForm.Get("renamed")) {
+			return input, fmt.Errorf("missing base revision or invalid rename intent")
+		}
+		decoder := json.NewDecoder(strings.NewReader(r.PostForm.Get("renamed")))
+		if err := decoder.Decode(&input.Renamed); err != nil {
+			return input, err
+		}
+		if input.Renamed == nil || len(input.Renamed) > navigation.MaxOperations {
+			return input, fmt.Errorf("invalid rename intent")
+		}
+		if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+			return input, fmt.Errorf("trailing rename JSON")
+		}
 	}
 	raw := r.PostForm.Get("desired")
 	if !utf8.ValidString(raw) {
@@ -160,6 +218,10 @@ func readNavigationEditorRequest(w http.ResponseWriter, r *http.Request, treeReq
 // New containers use temporary new:* IDs in the form. Only the server creates
 // persistent adm: UUIDs. Existing identities and all item targets remain fixed.
 func allocateNavigationContainers(base, effective navigation.Tree, desired *navigation.Tree) error {
+	return allocateNavigationContainersForLayer(base, effective, desired, navigation.AdminLayer)
+}
+
+func allocateNavigationContainersForLayer(base, effective navigation.Tree, desired *navigation.Tree, layer navigation.Layer) error {
 	existing := map[string]string{}
 	for _, tree := range []navigation.Tree{base, effective} {
 		for _, section := range tree.Sections {
@@ -185,7 +247,7 @@ func allocateNavigationContainers(base, effective navigation.Tree, desired *navi
 			return fmt.Errorf("unexpected container ID")
 		}
 		var err error
-		*id, err = navigation.NewCustomID(navigation.AdminLayer)
+		*id, err = navigation.NewCustomID(layer)
 		return err
 	}
 	for i := range desired.Sections {
