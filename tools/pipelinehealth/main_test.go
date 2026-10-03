@@ -66,6 +66,28 @@ func withMergeHead(item apiPull) apiPull {
 	return item
 }
 
+func TestParentLookupOnlyWhenStageNeedsIt(t *testing.T) {
+	first := addComment(testPR(10, headB, "reviewed"), 40, completion(headB, 35, 36))
+	if needsHeadParents(first, "ivanarama") {
+		t.Fatal("first full review on a merge HEAD does not require historical parent proof")
+	}
+	historic := addComment(first, 30, completion(headC, 20, 25))
+	if !needsHeadParents(historic, "ivanarama") {
+		t.Fatal("reviewed head with older proof must load parents before asking for ship")
+	}
+	for _, label := range []string{"hold", "needs-decision", "changes-requested"} {
+		parked := historic
+		parked.Labels = append(append([]apiLabel(nil), historic.Labels...), apiLabel{Name: label})
+		if needsHeadParents(parked, "ivanarama") {
+			t.Fatalf("parked %s head incurred a parent query", label)
+		}
+	}
+	ship := addComment(testPR(11, headB, "ship"), 30, completion(headC, 20, 25))
+	if !needsHeadParents(ship, "ivanarama") {
+		t.Fatal("ship candidate lost its parent gate")
+	}
+}
+
 func hasFinding(result report, code string) bool {
 	for _, item := range result.Findings {
 		if item.Code == code {

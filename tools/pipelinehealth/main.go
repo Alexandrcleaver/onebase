@@ -247,7 +247,8 @@ func loadPulls(github *githubRESTClient, repo, fixture string) ([]apiPull, error
 					continue
 				}
 				prs[index].Comments = comments
-				if !needsHeadParents(prs[index]) {
+				owner, _, _ := strings.Cut(repo, "/")
+				if !needsHeadParents(prs[index], owner) {
 					continue
 				}
 				var commitResponse struct {
@@ -967,12 +968,21 @@ func (result *report) addIssue(severity, code string, issue int, message string)
 }
 
 // needsHeadParents limits the extra commit read to pull requests whose stage
-// can depend on it: an open ship candidate targeting main.
-func needsHeadParents(pr apiPull) bool {
+// can depend on it: ship candidates and reviewed heads with older review proof.
+// The latter need their parents before we can safely ask the owner for ship.
+func needsHeadParents(pr apiPull, owner string) bool {
 	if pr.State != "open" || pr.Base.Ref != "main" || pr.Draft || pr.Head.SHA == "" {
 		return false
 	}
-	return labelSet(pr.Labels)["ship"]
+	labels := labelSet(pr.Labels)
+	if labels["ship"] {
+		return true
+	}
+	if !labels["reviewed"] || labels["hold"] || labels["needs-decision"] || labels["changes-requested"] {
+		return false
+	}
+	current, _, _ := currentProtocolState(pr.Comments, owner, pr.Head.SHA)
+	return reviewDepth(pr.Comments, owner) > current
 }
 
 // headIsBaseSyncMerge reports whether the head commit has the shape every
