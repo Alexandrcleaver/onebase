@@ -82,11 +82,14 @@ func (f navigationHTTPFixture) request(t *testing.T, method, path, login string,
 }
 
 type navigationBootstrap struct {
-	Base      navigation.Tree            `json:"base"`
-	Desired   navigation.Tree            `json:"desired"`
-	Revision  string                     `json:"revision"`
-	Subsystem string                     `json:"subsystem"`
-	Preview   []NavigationPreviewSection `json:"preview"`
+	Base         navigation.Tree            `json:"base"`
+	Desired      navigation.Tree            `json:"desired"`
+	Revision     string                     `json:"revision"`
+	Subsystem    string                     `json:"subsystem"`
+	Preview      []NavigationPreviewSection `json:"preview"`
+	BaseRevision string                     `json:"baseRevision"`
+	Renamed      []string                   `json:"renamed"`
+	Origins      map[string]string          `json:"origins"`
 }
 
 func (f navigationHTTPFixture) editor(t *testing.T, sub string) navigationBootstrap {
