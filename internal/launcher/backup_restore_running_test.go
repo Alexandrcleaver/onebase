@@ -635,9 +635,9 @@ func TestRawRestore_НайденныйМаркер_ОбъясняетRecovery(t 
 	h.runner.lifecycleMu.Unlock()
 }
 
-// Второй вход raw-восстановления — full-import с сырым дампом — отвечает той же
-// нейтральной диагностикой на повреждённую базу.
-func TestRawFullImport_ПоврежденнаяБаза_НейтральнаяДиагностика(t *testing.T) {
+// Полный бинарный .obz с конфигурацией отклоняется как неподдерживаемый формат
+// до пробы restore-маркера, даже если текущая база повреждена (#1563).
+func TestRawFullImport_БинарныйАрхив_НеподдерживаемыйФормат(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "corrupt-raw-import.db")
 	original := []byte("this is not a sqlite database")
 	if err := os.WriteFile(dbPath, original, 0o600); err != nil {
@@ -655,13 +655,16 @@ func TestRawFullImport_ПоврежденнаяБаза_НейтральнаяД
 
 	resp := postFullImport(t, h, b, []fullImportTestEntry{
 		{name: "database.db", data: []byte("raw sqlite dump bytes")},
+		{name: "config/app.yaml", data: []byte("name: Test\n")},
 	})
 	if resp["ok"] != false {
 		t.Fatalf("raw full-import поверх повреждённой базы не отклонён: %v", resp)
 	}
 	msg, _ := resp["error"].(string)
-	if strings.Contains(msg, "universal recovery is pending") {
-		t.Fatalf("raw full-import утверждает pending recovery без доказательств: %s", msg)
+	want := "Неподдерживаемый формат полной резервной копии: " +
+		"старый бинарный .obz не содержит внешние файлы и не может быть безопасно восстановлен как полный снимок; извлеките database.db/database.sql.gz и восстановите его как обычный бэкап"
+	if msg != want {
+		t.Fatalf("ожидался точный отказ бинарного full-import до пробы базы: got %q, want %q", msg, want)
 	}
 	after, err := os.ReadFile(dbPath) //nolint:gosec // G703: test-owned path below t.TempDir
 	if err != nil {
