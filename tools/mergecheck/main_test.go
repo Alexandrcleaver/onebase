@@ -135,6 +135,39 @@ func TestMergecheckCLIResolveAppendOnlyConflict(t *testing.T) {
 		!strings.Contains(string(output), "unresolved conflict file") {
 		t.Fatalf("resolved file was overwritten: %v\n%s", err, output)
 	}
+	// Literal marker examples inside a valid Markdown line do not make a
+	// previously resolved result writable again, even in the opposite order.
+	markerExample := "Marker examples: `<<<<<<<` and `>>>>>>>`.\n"
+	base = "# Changes\n" + markerExample
+	left, right = "- Left\n", "- Right\n"
+	for name, content := range map[string]string{
+		"base": base, "ours": base + left, "theirs": base + right,
+		"result": base + right + left,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "result"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	//nolint:gosec // G204: binary and arguments are test-owned fixtures.
+	if output, err := exec.Command(binary, args...).CombinedOutput(); err != nil {
+		t.Fatalf("literal marker fixture must be a valid resolution: %v\n%s", err, output)
+	}
+	//nolint:gosec // G204: binary and arguments are test-owned fixtures.
+	if output, err := exec.Command(binary, append([]string{"-resolve"}, args...)...).CombinedOutput(); err == nil ||
+		!strings.Contains(string(output), "unresolved conflict file") {
+		t.Fatalf("literal markers triggered replacement: %v\n%s", err, output)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "result"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("resolved file changed: before=%q after=%q", before, after)
+	}
 }
 
 func TestMergecheckCLIResolveRejectsContentConflictWithoutWriting(t *testing.T) {

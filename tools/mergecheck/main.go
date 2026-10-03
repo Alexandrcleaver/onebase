@@ -78,7 +78,9 @@ func run() error {
 		}
 	}
 	if *resolve {
-		if !strings.Contains(resolved, "<<<<<<<") || !strings.Contains(resolved, ">>>>>>>") {
+		// A marker shown in ordinary Markdown is not an unresolved merge. Never
+		// overwrite a result that the normal verifier already accepts, either.
+		if verify(string(merged), resolved, *kind) == nil || !hasConflictMarkers(resolved) {
 			return errors.New("-resolve requires an unresolved conflict file")
 		}
 		candidate, err := resolveEntries(string(merged))
@@ -91,6 +93,38 @@ func run() error {
 		return replaceFile(*result, []byte(candidate))
 	}
 	return verify(string(merged), resolved, *kind)
+}
+
+func hasConflictMarkers(content string) bool {
+	state, width, conflicts := 0, 0, 0
+	for _, line := range lines(content) {
+		switch state {
+		case 0:
+			if next := conflictStartWidth(line); next > 0 {
+				width, state = next, 1
+			}
+		case 1:
+			if line == strings.Repeat("=", width)+"\n" {
+				state = 2
+			}
+		case 2:
+			if strings.HasPrefix(line, strings.Repeat(">", width)+" ") {
+				state, conflicts = 0, conflicts+1
+			}
+		}
+	}
+	return state == 0 && conflicts > 0
+}
+
+func conflictStartWidth(line string) int {
+	width := 0
+	for width < len(line) && line[width] == '<' {
+		width++
+	}
+	if width < 7 || width >= len(line) || line[width] != ' ' {
+		return 0
+	}
+	return width
 }
 
 func resolveEntries(merged string) (string, error) {
