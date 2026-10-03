@@ -1532,5 +1532,14 @@
   "Не удалось получить предпросмотр меню": "Could not preview navigation",
   "Вернуть": "Restore",
   "Раздел": "Section",
-  "Загрузить актуальную версию и отбросить несохранённые изменения?": "Load the latest version and discard unsaved changes?"
+  "Загрузить актуальную версию и отбросить несохранённые изменения?": "Load the latest version and discard unsaved changes?",
+  "Настроить меню": "Customize menu",
+  "Мои настройки": "My settings",
+  "Моя настройка": "My setting",
+  "Общая настройка": "Common setting",
+  "Личная настройка меню. Неизменённые узлы наследуют общую настройку базы.": "Personal menu settings. Unchanged nodes inherit the common database layout.",
+  "Сбросить личную настройку к общей?": "Reset personal settings to the common layout?",
+  "Сбросить к общей настройке": "Reset to common settings",
+  "Повреждённая личная настройка пропущена. Показано общее меню; сохранение или сброс исправит этот слой.": "Invalid personal settings were skipped. The common menu is shown; save or reset to repair this layer.",
+  "Повреждённая общая настройка пропущена. Обратитесь к администратору базы.": "Invalid common settings were skipped. Contact your database administrator."
 }
