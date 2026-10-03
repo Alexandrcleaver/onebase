@@ -4,14 +4,12 @@
 package main
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -37,6 +35,7 @@ var (
 	triageRouteLabels = regexp.MustCompile(`(?m)^<!-- pp:triage-route-labels claim=([0-9]+) fingerprint-sha256=([0-9a-f]{64}) .+ -->$`)
 	triageAuthorReply = regexp.MustCompile(`(?m)^<!-- pp:triage-author-reply claim=([0-9]+) fingerprint-sha256=([0-9a-f]{64}) -->$`)
 	triageRouteDone   = regexp.MustCompile(`(?m)^<!-- pp:triage-route-done claim=([0-9]+) fingerprint-sha256=([0-9a-f]{64}) -->$`)
+	triageRouteVoid   = regexp.MustCompile(`(?m)^<!-- pp:triage-route-void claim=([0-9]+) -->$`)
 )
 
 type apiUser struct {
@@ -82,6 +81,7 @@ type apiPull struct {
 type apiIssue struct {
 	Number       int          `json:"number"`
 	Title        string       `json:"title"`
+	Body         string       `json:"body"`
 	HTMLURL      string       `json:"html_url"`
 	CreatedAt    string       `json:"created_at"`
 	UpdatedAt    string       `json:"updated_at"`
@@ -93,16 +93,19 @@ type apiIssue struct {
 }
 
 type candidate struct {
-	Number         int    `json:"number"`
-	Title          string `json:"title"`
-	URL            string `json:"url"`
-	Head           string `json:"head"`
-	Depth          int    `json:"review_depth"`
-	Stage          string `json:"stage"`
-	Priority       int    `json:"priority"`
-	PrioritySource string `json:"priority_source"`
-	UpdatedAt      string `json:"updated_at"`
-	IntegrationAt  string `json:"-"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+	Head   string `json:"head"`
+	// EligibilityDigest is a 160-bit prefix of a versioned SHA-256 snapshot.
+	// It reserves an issue in the scheduler; it is never mutation authority.
+	EligibilityDigest string `json:"eligibility_digest,omitempty"`
+	Depth             int    `json:"review_depth"`
+	Stage             string `json:"stage"`
+	Priority          int    `json:"priority"`
+	PrioritySource    string `json:"priority_source"`
+	UpdatedAt         string `json:"updated_at"`
+	IntegrationAt     string `json:"-"`
 }
 
 type finding struct {
@@ -139,18 +142,45 @@ func main() {
 	contract := flag.String("contract", ".claude/skills/review-queue/SKILL.md", "active REVIEW contract")
 	fixture := flag.String("prs", "", "read a JSON fixture instead of GitHub")
 	issueFixture := flag.String("issues", "", "read an issue JSON fixture instead of GitHub")
+	transport := flag.String("transport", "graphql", "GitHub read transport: graphql or rest")
+	cacheDir := flag.String("cache-dir", os.Getenv("PIPELINEHEALTH_CACHE_DIR"), "persistent GitHub REST cache directory (default: user cache directory)")
 	asJSON := flag.Bool("json", false, "print machine-readable JSON")
 	flag.Parse()
 
-	prs, err := loadPulls(*repo, *fixture)
-	if err != nil {
-		fail(err)
+	selectedTransport := strings.ToLower(strings.TrimSpace(*transport))
+	var prs []apiPull
+	var issues []apiIssue
+	var err error
+	switch selectedTransport {
+	case "graphql":
+		prs, issues, err = loadPipelineInputsGraphQL(newGHPipelineGraphQLClient(), *repo, *fixture, *issueFixture)
+	case "rest":
+		var github *githubRESTClient
+		if *fixture == "" {
+			var resolvedCacheDir string
+			resolvedCacheDir, err = resolveCacheDir(*cacheDir)
+			if err == nil {
+				github, err = newGitHubRESTClient(resolvedCacheDir)
+			}
+		}
+		if err == nil {
+			prs, err = loadPulls(github, *repo, *fixture)
+		}
+		if err == nil {
+			issues, err = loadIssues(github, *repo, *issueFixture, *fixture != "")
+		}
+	default:
+		err = fmt.Errorf("unknown GitHub transport %q; expected graphql or rest", *transport)
 	}
-	issues, err := loadIssues(*repo, *issueFixture, *fixture != "")
 	if err != nil {
 		fail(err)
 	}
 	result := analyze(prs, *owner)
+	if selectedTransport == "graphql" {
+		result.Scope = "complete GraphQL queue snapshot; mutation gates remain independent GraphQL proofs"
+	} else {
+		result.Scope = "conditional REST queue snapshot; mutation gates remain GraphQL"
+	}
 	analyzeIssues(&result, issues, prs, *owner)
 	checkContract(&result, *contract)
 	result.finish()
@@ -174,7 +204,7 @@ func fail(err error) {
 	os.Exit(2)
 }
 
-func loadPulls(repo, fixture string) ([]apiPull, error) {
+func loadPulls(github *githubRESTClient, repo, fixture string) ([]apiPull, error) {
 	if fixture != "" {
 		data, err := os.ReadFile(fixture)
 		if err != nil {
@@ -187,14 +217,12 @@ func loadPulls(repo, fixture string) ([]apiPull, error) {
 		return prs, nil
 	}
 
-	gh := os.Getenv("GH_EXE")
-	if gh == "" {
-		gh = "gh"
+	if github == nil {
+		return nil, fmt.Errorf("GitHub REST client is required outside fixture mode")
 	}
-	var prs []apiPull
-	if err := ghJSONLines(gh, &prs, "api", "--paginate",
-		"repos/"+repo+"/pulls?state=open&per_page=100&sort=created&direction=asc",
-		"--jq", ".[]"); err != nil {
+	prs, err := getAllPages[apiPull](github,
+		"repos/"+repo+"/pulls?state=open&per_page=100&sort=created&direction=asc")
+	if err != nil {
 		return nil, fmt.Errorf("list pull requests: %w", err)
 	}
 
@@ -213,22 +241,27 @@ func loadPulls(repo, fixture string) ([]apiPull, error) {
 			defer wg.Done()
 			for index := range jobs {
 				path := fmt.Sprintf("repos/%s/issues/%d/comments?per_page=100", repo, prs[index].Number)
-				if err := ghJSONLines(gh, &prs[index].Comments, "api", "--paginate", path, "--jq", ".[]"); err != nil {
+				comments, err := getAllPages[apiComment](github, path)
+				if err != nil {
 					errs <- fmt.Errorf("comments for PR #%d: %w", prs[index].Number, err)
 					continue
 				}
-				if !needsHeadParents(prs[index]) {
+				prs[index].Comments = comments
+				owner, _, _ := strings.Cut(repo, "/")
+				if !needsHeadParents(prs[index], owner) {
 					continue
 				}
-				var parents []struct {
-					SHA string `json:"sha"`
+				var commitResponse struct {
+					Parents []struct {
+						SHA string `json:"sha"`
+					} `json:"parents"`
 				}
 				commit := fmt.Sprintf("repos/%s/commits/%s", repo, prs[index].Head.SHA)
-				if err := ghJSONLines(gh, &parents, "api", commit, "--jq", ".parents[]"); err != nil {
+				if err := github.getJSON(commit, &commitResponse); err != nil {
 					errs <- fmt.Errorf("head parents for PR #%d: %w", prs[index].Number, err)
 					continue
 				}
-				for _, parent := range parents {
+				for _, parent := range commitResponse.Parents {
 					prs[index].HeadParents = append(prs[index].HeadParents, parent.SHA)
 				}
 			}
@@ -248,7 +281,7 @@ func loadPulls(repo, fixture string) ([]apiPull, error) {
 	return prs, nil
 }
 
-func loadIssues(repo, fixture string, skipLive bool) ([]apiIssue, error) {
+func loadIssues(github *githubRESTClient, repo, fixture string, skipLive bool) ([]apiIssue, error) {
 	if fixture != "" {
 		data, err := os.ReadFile(fixture)
 		if err != nil {
@@ -266,14 +299,12 @@ func loadIssues(repo, fixture string, skipLive bool) ([]apiIssue, error) {
 		return []apiIssue{}, nil
 	}
 
-	gh := os.Getenv("GH_EXE")
-	if gh == "" {
-		gh = "gh"
+	if github == nil {
+		return nil, fmt.Errorf("GitHub REST client is required outside fixture mode")
 	}
-	var all []apiIssue
-	if err := ghJSONLines(gh, &all, "api", "--paginate",
-		"repos/"+repo+"/issues?state=open&per_page=100&sort=created&direction=asc",
-		"--jq", ".[]"); err != nil {
+	all, err := getAllPages[apiIssue](github,
+		"repos/"+repo+"/issues?state=open&per_page=100&sort=created&direction=asc")
+	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)
 	}
 	issues := make([]apiIssue, 0, len(all))
@@ -296,9 +327,12 @@ func loadIssues(repo, fixture string, skipLive bool) ([]apiIssue, error) {
 			defer wg.Done()
 			for index := range jobs {
 				path := fmt.Sprintf("repos/%s/issues/%d/comments?per_page=100", repo, issues[index].Number)
-				if err := ghJSONLines(gh, &issues[index].Thread, "api", "--paginate", path, "--jq", ".[]"); err != nil {
+				comments, err := getAllPages[apiComment](github, path)
+				if err != nil {
 					errs <- fmt.Errorf("comments for issue #%d: %w", issues[index].Number, err)
+					continue
 				}
+				issues[index].Thread = comments
 			}
 		}()
 	}
@@ -316,39 +350,9 @@ func loadIssues(repo, fixture string, skipLive bool) ([]apiIssue, error) {
 	return issues, nil
 }
 
-func ghJSONLines(gh string, destination any, args ...string) error {
-	// GH_EXE is an explicit operator setting, and arguments are passed without a shell.
-	//nolint:gosec // The executable path is trusted configuration, not GitHub data.
-	cmd := exec.Command(gh, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
-	}
-
-	// gh --paginate --jq '.[]' emits one JSON object per line. Decode into a
-	// temporary generic slice, then marshal once into the typed destination.
-	var values []json.RawMessage
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			values = append(values, json.RawMessage(line))
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	data, err := json.Marshal(values)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, destination)
-}
-
 func analyze(prs []apiPull, owner string) report {
 	result := report{
-		State: "green", Scope: "fast REST snapshot; mutation gates remain GraphQL",
+		State: "green", Scope: "read-only queue snapshot; mutation gates remain GraphQL",
 		Scheduler: "two-lane-safety-priority-aging-depth-number", Checked: len(prs),
 		ReviewCandidates: []candidate{}, ContentReviewCandidates: []candidate{},
 		ReviewBacklog: []candidate{}, ReviewedWaitingShip: []candidate{}, MergeCandidates: []candidate{}, MergeExecutable: []candidate{}, PlanCandidates: []candidate{}, FixCandidates: []candidate{},
@@ -370,6 +374,10 @@ func analyze(prs []apiPull, owner string) report {
 		priority, prioritySource := queuePriority(labels, pr.CreatedAt, now)
 		item := candidate{Number: pr.Number, Title: pr.Title, URL: pr.HTMLURL, Head: pr.Head.SHA, Depth: depth, Stage: "review", Priority: priority, PrioritySource: prioritySource, UpdatedAt: pr.UpdatedAt}
 		currentCompletions, latestCompletion, latestOverride := currentProtocolState(pr.Comments, owner, pr.Head.SHA)
+		legacySourceCompletions := 0
+		if headIsBaseSyncMerge(pr) {
+			legacySourceCompletions, _, _ = currentProtocolState(pr.Comments, owner, pr.HeadParents[0])
+		}
 		carryDone, carryIntentOpen, v1AbortCurrent, baseAdvanced, protocolHistory, integrationAt := baseSyncRESTState(pr.Comments, owner, pr.Head.SHA, pr.HeadParents)
 		item.IntegrationAt = integrationAt
 		if baseAdvanced {
@@ -428,6 +436,22 @@ func analyze(prs []apiPull, owner string) report {
 				result.MergeCandidates = append(result.MergeCandidates, item)
 			case v1AbortCurrent && currentCompletions == 0:
 				result.ContentReviewCandidates = append(result.ContentReviewCandidates, item)
+			case currentCompletions > 0 && depth == currentCompletions && !protocolHistory:
+				// A PR may be opened with a merge commit already at its first HEAD.
+				// With no earlier committed review or base-sync transaction, its
+				// first review is a full content review of that exact HEAD, not a
+				// carried integration review of the merge's first parent. The
+				// independent mutation gate still proves review, ship and CI.
+				item.Stage = "merge"
+				result.MergeCandidates = append(result.MergeCandidates, item)
+			case depth > currentCompletions && headIsBaseSyncMerge(pr) && legacySourceCompletions == 0:
+				// A legacy integration review cannot reconstruct the first parent's
+				// content proof. Do not grant this PR single-flight ownership only to
+				// have the independent GraphQL gate reject it on every retry.
+				item.Stage = "legacy-source-proof-missing"
+				result.HumanWaiting = append(result.HumanWaiting, item)
+				result.add("yellow", "legacy_source_review_missing", pr.Number,
+					"первый родитель merge-коммита не имеет доверенного завершённого REVIEW; требуется восстановление маршрута человеком, остальные PR не блокируются")
 			case currentCompletions > 0 && depth > currentCompletions && headIsBaseSyncMerge(pr):
 				item.Stage = "legacy-integration-merge-ready"
 				result.ReviewCandidates = append(result.ReviewCandidates, item)
@@ -475,6 +499,15 @@ func analyze(prs []apiPull, owner string) report {
 			result.HumanWaiting = append(result.HumanWaiting, item)
 		case labels["changes-requested"] && !overrideOpen:
 			result.FixCandidates = append(result.FixCandidates, item)
+		case depth > currentCompletions && headIsBaseSyncMerge(pr) && legacySourceCompletions == 0 && !carryDone && !v1AbortCurrent:
+			// A completed review of this HEAD is not enough to turn an earlier
+			// needs-decision review of a different SHA into source proof. Show the
+			// recovery before asking for ship; otherwise the owner is invited into
+			// a merge gate that cannot succeed.
+			item.Stage = "legacy-source-proof-missing"
+			result.HumanWaiting = append(result.HumanWaiting, item)
+			result.add("yellow", "legacy_source_review_missing", pr.Number,
+				"первый родитель merge-коммита не имеет доверенного завершённого REVIEW; ship не поможет: нужен новый обычный content HEAD и полное REVIEW")
 		case labels["reviewed"] && currentCompletions > 0 && !overrideOpen:
 			// Valid-looking current review is waiting for the human ship decision.
 			result.ReviewedWaitingShip = append(result.ReviewedWaitingShip, item)
@@ -534,6 +567,14 @@ func analyzeIssues(result *report, issues []apiIssue, prs []apiPull, owner strin
 		}
 
 		labels := labelSet(issue.Labels)
+		if labels["ready-fix"] && labels["needs-decision"] && !labels["approved"] {
+			result.addIssue("yellow", "issue_route_conflict", issue.Number,
+				"ready-fix конфликтует с needs-decision: автоматический FIX остановлен до явного решения")
+		}
+		if labels["manual"] && (labels["approved"] || labels["ready-fix"] || labels["plan-needed"] || labels["in-work"]) {
+			result.addIssue("yellow", "manual_route_conflict", issue.Number,
+				"manual сочетается с автоматической маршрутной меткой, которая не будет исполнена")
+		}
 		route := inspectTriageRoute(issue, owner)
 		routeFinding := false
 		routeMismatch := false
@@ -595,6 +636,12 @@ func analyzeIssues(result *report, issues []apiIssue, prs []apiPull, owner strin
 				}
 				continue
 			}
+			if issue.CommentCount > len(issue.Thread) {
+				result.addIssue("yellow", "fix_issue_incomplete_comments", issue.Number,
+					"заявка исключена из FIX-очереди: снимок комментариев неполон")
+				continue
+			}
+			item.EligibilityDigest = fixIssueEligibilityDigest(issue)
 			result.FixCandidates = append(result.FixCandidates, item)
 		case labels["needs-decision"]:
 			item.Stage = "human-decision"
@@ -604,6 +651,33 @@ func analyzeIssues(result *report, issues []apiIssue, prs []apiPull, owner strin
 	sortCandidates(result.PlanCandidates)
 	sortCandidates(result.FixCandidates)
 	sortCandidates(result.HumanWaiting)
+}
+
+// fixIssueEligibilityDigest is an election revision, not authorization to
+// change GitHub. A future FIX gate must re-read eligibility and the canonical
+// project protocol immediately before each mutation. The 160-bit prefix fits
+// the scheduler's existing exact-target reservation key (historically HEAD).
+func fixIssueEligibilityDigest(issue apiIssue) string {
+	labels := make([]string, 0, len(issue.Labels))
+	for _, label := range issue.Labels {
+		labels = append(labels, label.Name)
+	}
+	sort.Strings(labels)
+	comments := append([]apiComment(nil), issue.Thread...)
+	sort.Slice(comments, func(i, j int) bool { return comments[i].ID < comments[j].ID })
+	input := struct {
+		Version   int          `json:"version"`
+		Number    int          `json:"number"`
+		State     string       `json:"state"`
+		Title     string       `json:"title"`
+		Body      string       `json:"body"`
+		UpdatedAt string       `json:"updated_at"`
+		Labels    []string     `json:"labels"`
+		Comments  []apiComment `json:"comments"`
+	}{1, issue.Number, issue.State, issue.Title, issue.Body, issue.UpdatedAt, labels, comments}
+	encoded, _ := json.Marshal(input) // fixed Go types cannot fail to marshal
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:20])
 }
 
 func openPullsReferencingIssue(number int, prs []apiPull) []int {
@@ -670,7 +744,7 @@ func inspectTriageRoute(issue apiIssue, owner string) triageRouteState {
 	}
 	state.route = records[0][3]
 	claimID := strconv.FormatInt(root.ID, 10)
-	labelsCommitted, replyCommitted, done := false, false, false
+	labelsCommitted, replyCommitted, done, voided := false, false, false, false
 	replyRequired := records[0][4] == "required"
 	for _, comment := range thread {
 		if !trustedUnedited(comment, owner) || comment.CreatedAt < root.CreatedAt ||
@@ -692,6 +766,17 @@ func inspectTriageRoute(issue apiIssue, owner string) triageRouteState {
 				done = true
 			}
 		}
+		for _, match := range triageRouteVoid.FindAllStringSubmatch(comment.Body, -1) {
+			if match[1] == claimID {
+				voided = true
+			}
+		}
+	}
+	// Право объявить транзакцию мёртвой — у человека, и только точной строкой:
+	// TRIAGE не может ни завершить чужой label POST, ни доказать его владельца.
+	// После void маршрутной записи больше нет — FIX идёт по фактическим меткам.
+	if voided {
+		return triageRouteState{ready: true}
 	}
 	if !done {
 		state.reason = "TRIAGE route claim is unfinished; FIX must wait for matching labels/reply/done markers"
@@ -785,13 +870,22 @@ func checkContract(result *report, path string) {
 	mergeData, err := readContract(filepath.Join(skillsRoot, "merge-shepherd", "SKILL.md"))
 	if err != nil || !strings.Contains(text, "pp:base-sync-done") ||
 		!strings.Contains(text, "single-flight-барьер") ||
+		!strings.Contains(text, "Позиция edge нового коммита относительно") ||
+		!strings.Contains(text, "доказывай графом") ||
+		strings.Contains(text, "обязан быть ровно одним `PullRequestCommit` после") ||
 		!strings.Contains(string(mergeData), "pp:base-sync-intent") ||
-		!strings.Contains(string(mergeData), "pp:merge-cleanup-intent") ||
-		!strings.Contains(string(mergeData), "complete merge-cleanup") ||
 		!strings.Contains(string(mergeData), "повторный человеческий `ship` при валидной") ||
 		!strings.Contains(string(mergeData), "single-flight-барьер") {
 		result.add("red", "unsafe_base_sync_contract", 0,
 			"активные REVIEW/MERGE contracts не гарантируют перенос ship и single-flight через доказанный base-sync")
+		return
+	}
+	// Гарантии merge-cleanup отвечают за отдельный шаг — их поломка не должна
+	// маскироваться под проблему переноса ship/base-sync (#1524).
+	if !strings.Contains(string(mergeData), "pp:merge-cleanup-intent") ||
+		!strings.Contains(string(mergeData), "complete merge-cleanup") {
+		result.add("red", "unsafe_merge_cleanup_contract", 0,
+			"в merge-shepherd contract нет гарантий merge-cleanup (pp:merge-cleanup-intent / complete merge-cleanup)")
 		return
 	}
 	for _, name := range []string{"triage-issues", "plan-approved", "fix-approved", "review-queue", "merge-shepherd", "tail-issues"} {
@@ -874,12 +968,21 @@ func (result *report) addIssue(severity, code string, issue int, message string)
 }
 
 // needsHeadParents limits the extra commit read to pull requests whose stage
-// can depend on it: an open ship candidate targeting main.
-func needsHeadParents(pr apiPull) bool {
+// can depend on it: ship candidates and reviewed heads with older review proof.
+// The latter need their parents before we can safely ask the owner for ship.
+func needsHeadParents(pr apiPull, owner string) bool {
 	if pr.State != "open" || pr.Base.Ref != "main" || pr.Draft || pr.Head.SHA == "" {
 		return false
 	}
-	return labelSet(pr.Labels)["ship"]
+	labels := labelSet(pr.Labels)
+	if labels["ship"] {
+		return true
+	}
+	if !labels["reviewed"] || labels["hold"] || labels["needs-decision"] || labels["changes-requested"] {
+		return false
+	}
+	current, _, _ := currentProtocolState(pr.Comments, owner, pr.Head.SHA)
+	return reviewDepth(pr.Comments, owner) > current
 }
 
 // headIsBaseSyncMerge reports whether the head commit has the shape every
