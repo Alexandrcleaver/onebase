@@ -197,3 +197,62 @@ func TestRefAttrDereferenceReportsJoinedSource(t *testing.T) {
 		t.Fatalf("присоединённый справочник не в источниках: %+v", res.Sources)
 	}
 }
+
+// Тип одноимённого поля основной таблицы не должен менять ни ссылочный
+// отбор, ни числовое сравнение/сортировку реквизита присоединённой сущности.
+func TestRefAttrDereferenceNumberCollisionMatrix(t *testing.T) {
+	dbtest.ForEachDialect(t, func(t *testing.T, db *storage.DB) {
+		ctx := context.Background()
+		ents := derefEntities()
+		ents[1].Fields = append(ents[1].Fields,
+			metadata.Field{Name: "Балл", Type: metadata.FieldTypeNumber})
+		ents[2].Fields = append(ents[2].Fields,
+			metadata.Field{Name: "Учётка", Type: metadata.FieldTypeNumber},
+			metadata.Field{Name: "Owner", Type: metadata.FieldTypeNumber},
+			metadata.Field{Name: "Балл", Type: metadata.FieldTypeString})
+		if err := db.Migrate(ctx, ents); err != nil {
+			t.Fatal(err)
+		}
+		for i, account := range []uuid.UUID{derefУчётка1, derefУчётка2} {
+			if err := db.Upsert(ctx, ents[0].Name, account,
+				map[string]any{"Наименование": "учётка"}, ents[0]); err != nil {
+				t.Fatal(err)
+			}
+			employee := uuid.New()
+			score, number := 10, "З-1"
+			if i == 1 {
+				score, number = 2, "З-2"
+			}
+			if err := db.Upsert(ctx, ents[1].Name, employee,
+				map[string]any{"Учётка": account, "Owner": "свой", "Балл": score}, ents[1]); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Upsert(ctx, ents[2].Name, uuid.New(),
+				map[string]any{"Номер": number, "Исполнитель": employee, "Учётка": score, "Owner": score, "Балл": "текст"}, ents[2]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, qualified := range []bool{false, true} {
+			name, from, prefix := "без квалификатора источника", "Документ.ЗадачаДереф", ""
+			if qualified {
+				name, from, prefix = "с квалификатором источника", "Документ.ЗадачаДереф КАК З", "З."
+			}
+			t.Run(name, func(t *testing.T) {
+				opts := query.CompileOpts{Entities: ents, Params: map[string]any{"У": derefУчётка1}}
+				selectNumber := "ВЫБРАТЬ " + prefix + "Номер ИЗ " + from
+				t.Run("ссылка при одноимённом числе", func(t *testing.T) {
+					assertNumbers(t, derefNumbers(t, db, selectNumber+" ГДЕ "+prefix+"Исполнитель.Учётка = &У", opts), "З-1")
+				})
+				t.Run("строка при одноимённом числе", func(t *testing.T) {
+					assertNumbers(t, derefNumbers(t, db, selectNumber+" ГДЕ "+prefix+`Исполнитель.Owner = "свой" УПОРЯДОЧИТЬ ПО `+prefix+"Номер", opts), "З-1", "З-2")
+				})
+				t.Run("числовое сравнение при одноимённой строке", func(t *testing.T) {
+					assertNumbers(t, derefNumbers(t, db, selectNumber+" ГДЕ "+prefix+"Исполнитель.Балл > 9", opts), "З-1")
+				})
+				t.Run("числовая сортировка при одноимённой строке", func(t *testing.T) {
+					assertNumbers(t, derefNumbers(t, db, selectNumber+" УПОРЯДОЧИТЬ ПО "+prefix+"Исполнитель.Балл", opts), "З-2", "З-1")
+				})
+			})
+		}
+	})
+}
