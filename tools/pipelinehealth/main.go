@@ -379,6 +379,7 @@ func analyze(prs []apiPull, owner string) report {
 			legacySourceCompletions, _, _ = currentProtocolState(pr.Comments, owner, pr.HeadParents[0])
 		}
 		carryDone, carryIntentOpen, v1AbortCurrent, baseAdvanced, protocolHistory, integrationAt := baseSyncRESTState(pr.Comments, owner, pr.Head.SHA, pr.HeadParents)
+		overrideOpen := latestOverride > latestCompletion
 		item.IntegrationAt = integrationAt
 		if baseAdvanced {
 			result.add("yellow", "base_sync_base_advanced", pr.Number,
@@ -414,7 +415,7 @@ func analyze(prs []apiPull, owner string) report {
 		}
 		if labels["ship"] {
 			switch {
-			case labels["needs-decision"]:
+			case labels["needs-decision"] && !overrideOpen:
 				result.HumanWaiting = append(result.HumanWaiting, item)
 			case carryIntentOpen:
 				item.Stage = "integration-merge-recovery"
@@ -422,6 +423,16 @@ func analyze(prs []apiPull, owner string) report {
 				result.MergeCandidates = append(result.MergeCandidates, item)
 				result.add("yellow", "base_sync_recovery", pr.Number,
 					"есть pp:base-sync-intent без done; MERGE должен восстановить транзакцию")
+			case overrideOpen && carryDone && headIsBaseSyncMerge(pr):
+				// A later trusted human request invalidates the previous review
+				// epoch even when ship is still present. Recheck the integration
+				// HEAD before MERGE may rely on the sticky ship intent.
+				item.Stage = "integration-review"
+				result.ReviewCandidates = append(result.ReviewCandidates, item)
+			case overrideOpen:
+				// For an ordinary HEAD, a new review epoch requires a full
+				// content review; neither ship nor reviewed is proof for it.
+				result.ContentReviewCandidates = append(result.ContentReviewCandidates, item)
 			case carryDone && currentCompletions > 0:
 				item.Stage = "integration-merge-ready"
 				result.ReviewCandidates = append(result.ReviewCandidates, item)
@@ -493,7 +504,6 @@ func analyze(prs []apiPull, owner string) report {
 			}
 			continue
 		}
-		overrideOpen := latestOverride > latestCompletion
 		switch {
 		case labels["needs-decision"] && !overrideOpen:
 			result.HumanWaiting = append(result.HumanWaiting, item)
