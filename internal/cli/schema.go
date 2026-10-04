@@ -526,10 +526,17 @@ func managedFormSchema() map[string]any {
 			"op":    enumSchema("eq", "eq_or_empty", "in_hierarchy"),
 			"from":  stringSchema("Источник Объект.<Поле>, Форма.<Поле> или Объект.<Поле>.<Реквизит> — один переход по ссылке; конец пути — ссылка или, для строкового field и eq, строковый реквизит"),
 			"value": boolSchema("Булев литерал: is_folder или булев реквизит справочника"),
+			"ref": map[string]any{
+				"type":        "string",
+				"format":      "uuid",
+				"pattern":     "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+				"description": "Постоянная ссылка: UUID записи справочника, на который ссылается field (для parent_id — самого справочника). Записи нет или она не видна пользователю — подбор пуст при любом операторе",
+			},
 		},
 		"oneOf": []any{
-			map[string]any{"required": []string{"from"}, "not": map[string]any{"required": []string{"value"}}},
-			map[string]any{"required": []string{"value"}, "not": map[string]any{"required": []string{"from"}}},
+			map[string]any{"required": []string{"from"}, "not": map[string]any{"anyOf": []any{map[string]any{"required": []string{"value"}}, map[string]any{"required": []string{"ref"}}}}},
+			map[string]any{"required": []string{"value"}, "not": map[string]any{"anyOf": []any{map[string]any{"required": []string{"from"}}, map[string]any{"required": []string{"ref"}}}}},
+			map[string]any{"required": []string{"ref"}, "not": map[string]any{"anyOf": []any{map[string]any{"required": []string{"from"}}, map[string]any{"required": []string{"value"}}}}},
 		},
 	}
 	element := map[string]any{

@@ -160,7 +160,31 @@ func (s *Server) adminNavigationLayer(r *http.Request, base navigation.Tree) (na
 func (s *Server) buildNavigation(r *http.Request, menu *metadata.Menu, contents *metadata.SubsystemContents, global bool, sub string) []navGroup {
 	base, configured := s.configurationNavigation(menu, contents, global, sub)
 	tree, _ := s.adminNavigationLayer(r, base)
+	tree = s.personalNavigationLayer(r, tree)
 	return s.navigationGroups(r, tree, base, configured, global && contents.IsEmpty(), sub)
+}
+
+func (s *Server) personalNavigationLayer(r *http.Request, base navigation.Tree) navigation.Tree {
+	login := currentUserLogin(r)
+	if s.store == nil || login == "" {
+		return base
+	}
+	setting, err := s.store.GetNavigationSettings(r.Context(), storage.NavigationSettingsScope{Layer: navigation.UserLayer, Context: base.Context, Login: login})
+	if err != nil {
+		slog.Warn("personal navigation unavailable", "context", base.Context)
+		return base
+	}
+	var raw []byte
+	if setting.Exists {
+		raw = []byte(setting.Raw)
+	}
+	tree, diagnostics := navigation.Compose(base, nil, raw)
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == "invalid-layer" {
+			slog.Warn("invalid navigation settings skipped", "context", base.Context, "layer", "user")
+		}
+	}
+	return tree
 }
 
 func (s *Server) navigationGroups(r *http.Request, tree, base navigation.Tree, configured, flat bool, sub string) []navGroup {

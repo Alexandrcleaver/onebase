@@ -50,7 +50,9 @@ if (!op) throw new Error('the editor must offer eq_or_empty');
 equal(op.value, 'eq_or_empty', 'opening the panel must preserve the operator');
 const mode = nodes.find(node => node.tag === 'select' &&
   node.children.some(option => option.value === 'value'));
-equal(mode.disabled, true, 'eq_or_empty requires a field source');
+// The boolean literal exists only for eq; from and ref stay selectable (#1820).
+equal(mode.children.find(option => option.value === 'value').disabled, true, 'eq_or_empty has no boolean literal');
+equal(!!mode.disabled, false, 'eq_or_empty still chooses between from and ref');
 const field = nodes.find(node => node.tag === 'input' && node.value === 'Филиал');
 field.value = 'ДругойФилиал';
 field.handlers.change();
@@ -71,7 +73,40 @@ equal(edits[1].choice_filter, JSON.stringify([
 ]), 'switching operator must not retain a boolean literal');
 const secondMode = all(secondPanel).find(node => node.tag === 'select' &&
   node.children.some(option => option.value === 'value'));
-equal(secondMode.disabled, true, 'switching to eq_or_empty disables boolean mode');
+equal(secondMode.children.find(option => option.value === 'value').disabled, true, 'switching to eq_or_empty disables boolean mode');
+// ref (#1820): an existing fixed reference opens in ref mode and survives edits.
+const folder = 'd4ba641c-70ae-4632-bf99-035f4caaa0af';
+const thirdPanel = new Element('panel');
+addChoiceFilterEditor(thirdPanel, { choiceFilter: [
+  { field: 'parent_id', op: 'in_hierarchy', ref: folder }
+] });
+const thirdMode = all(thirdPanel).find(node => node.tag === 'select' &&
+  node.children.some(option => option.value === 'ref'));
+equal(thirdMode.value, 'ref', 'a fixed reference opens in ref mode');
+const refInput = all(thirdPanel).find(node => node.tag === 'input' && node.value === folder);
+if (!refInput) throw new Error('ref input was not rendered');
+const thirdField = all(thirdPanel).find(node => node.tag === 'input' && node.value === 'parent_id');
+thirdField.handlers.change();
+equal(edits[edits.length - 1].choice_filter, JSON.stringify([
+  { field: 'parent_id', op: 'in_hierarchy', ref: folder }
+]), 'ref is submitted as the only source');
+// Switching to ref with no UUID yet must not write a condition without source.
+const fourthPanel = new Element('panel');
+addChoiceFilterEditor(fourthPanel, { choiceFilter: [
+  { field: 'parent_id', op: 'eq', from: 'Объект.Папка' }
+] });
+const fourthMode = all(fourthPanel).find(node => node.tag === 'select' &&
+  node.children.some(option => option.value === 'ref'));
+const before = edits.length;
+fourthMode.value = 'ref';
+fourthMode.handlers.change();
+equal(edits.length, before, 'empty ref is not written');
+const emptyRef = all(fourthPanel).find(node => node.tag === 'input' && node.value === '' && node.placeholder);
+emptyRef.value = ' ' + folder + ' ';
+emptyRef.handlers.change();
+equal(edits[edits.length - 1].choice_filter, JSON.stringify([
+  { field: 'parent_id', op: 'eq', ref: folder }
+]), 'entered UUID is trimmed and written as ref');
 `
 	// eval the function from the page in the same global scope as its DOM stubs.
 	script := testScript[:strings.Index(testScript, "const panel =")] + "\neval(" + strconv.Quote(page[start:start+end]) + ");\n" + testScript[strings.Index(testScript, "const panel ="):]
