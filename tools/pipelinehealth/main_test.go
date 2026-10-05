@@ -66,6 +66,28 @@ func withMergeHead(item apiPull) apiPull {
 	return item
 }
 
+func TestParentLookupOnlyWhenStageNeedsIt(t *testing.T) {
+	first := addComment(testPR(10, headB, "reviewed"), 40, completion(headB, 35, 36))
+	if needsHeadParents(first, "ivanarama") {
+		t.Fatal("first full review on a merge HEAD does not require historical parent proof")
+	}
+	historic := addComment(first, 30, completion(headC, 20, 25))
+	if !needsHeadParents(historic, "ivanarama") {
+		t.Fatal("reviewed head with older proof must load parents before asking for ship")
+	}
+	for _, label := range []string{"hold", "needs-decision", "changes-requested"} {
+		parked := historic
+		parked.Labels = append(append([]apiLabel(nil), historic.Labels...), apiLabel{Name: label})
+		if needsHeadParents(parked, "ivanarama") {
+			t.Fatalf("parked %s head incurred a parent query", label)
+		}
+	}
+	ship := addComment(testPR(11, headB, "ship"), 30, completion(headC, 20, 25))
+	if !needsHeadParents(ship, "ivanarama") {
+		t.Fatal("ship candidate lost its parent gate")
+	}
+}
+
 func hasFinding(result report, code string) bool {
 	for _, item := range result.Findings {
 		if item.Code == code {
@@ -122,6 +144,38 @@ func TestOverrideStartsAnotherReviewEpoch(t *testing.T) {
 	got := analyze([]apiPull{item}, "ivanarama")
 	if len(got.ReviewCandidates) != 1 || got.ReviewCandidates[0].Number != 10 {
 		t.Fatalf("human override did not return PR to REVIEW: %+v", got)
+	}
+}
+
+func TestShippedNeedsDecisionOverrideReturnsBaseSyncToReview(t *testing.T) {
+	item := withMergeHead(testPR(1778, headC, "ship", "reviewed", "needs-decision"))
+	item = addComment(item, 20, completion(headA, 10, 15))
+	item = addComment(item, 30, syncIntent(headA, 10, 15, 20))
+	item = addComment(item, 31, syncDone(30, headA, headC))
+	item = addComment(item, 40, completion(headC, 35, 36))
+
+	blocked := analyze([]apiPull{item}, "ivanarama")
+	if len(blocked.HumanWaiting) != 1 || len(blocked.ReviewCandidates) != 0 {
+		t.Fatalf("ship + needs-decision moved without human override: %+v", blocked)
+	}
+
+	item = addComment(item, 41, "Owner: repeat integration review after green CI.\n\npp:review-again")
+	got := analyze([]apiPull{item}, "ivanarama")
+	if len(got.HumanWaiting) != 0 || len(got.MergeCandidates) != 0 ||
+		len(got.ReviewCandidates) != 1 || got.ReviewCandidates[0].Number != 1778 ||
+		got.ReviewCandidates[0].Stage != "integration-review" {
+		t.Fatalf("human override did not return shipped integration HEAD to REVIEW: %+v", got)
+	}
+}
+
+func TestShippedOrdinaryHeadOverrideRequiresContentReview(t *testing.T) {
+	item := addComment(testPR(10, headA, "ship", "reviewed"), 30, completion(headA, 20, 25))
+	item = addComment(item, 31, "pp:review-again")
+
+	got := analyze([]apiPull{item}, "ivanarama")
+	if len(got.ContentReviewCandidates) != 1 ||
+		got.ContentReviewCandidates[0].Number != 10 || len(got.MergeCandidates) != 0 {
+		t.Fatalf("ship bypassed a later review override: %+v", got)
 	}
 }
 
@@ -417,6 +471,22 @@ func TestLegacyMergeWithoutSourceReviewDoesNotOwnTheLane(t *testing.T) {
 	}
 }
 
+func TestLegacyMergeWithoutSourceReviewDoesNotAskForShip(t *testing.T) {
+	// The current merge HEAD was fully reviewed, but the earlier completed
+	// review is for a different SHA than the merge's first parent. Re-shipping
+	// would send this PR to a gate that cannot prove the legacy source.
+	broken := withMergeHead(addComment(testPR(1321, headB, "reviewed"), 30,
+		completion(headC, 20, 25)))
+	broken = addComment(broken, 40, completion(headB, 35, 36))
+	got := analyze([]apiPull{broken}, "ivanarama")
+	if len(got.ReviewedWaitingShip) != 0 || len(got.MergeCandidates) != 0 ||
+		len(got.HumanWaiting) != 1 || got.HumanWaiting[0].Number != 1321 ||
+		got.HumanWaiting[0].Stage != "legacy-source-proof-missing" ||
+		!hasFinding(got, "legacy_source_review_missing") {
+		t.Fatalf("unprovable merge HEAD incorrectly asked for ship: %+v", got)
+	}
+}
+
 func TestFirstReviewOfMergeHeadUsesOrdinaryMergeLane(t *testing.T) {
 	// The branch was already a merge commit when its first full content review
 	// completed. Its HEAD differs from both parents, and there is no earlier
@@ -615,6 +685,14 @@ func TestSingleFlightExposesOnlyFirstIntegrationReview(t *testing.T) {
 	if len(got.ContentReviewCandidates) != 1 || got.ContentReviewCandidates[0].Number != 1 {
 		t.Fatalf("content backlog disappeared behind the integration owner: %+v", got)
 	}
+	if len(got.ParallelReviewCandidates) != 1 || got.ParallelReviewCandidates[0].Number != 1 {
+		t.Fatalf("ordinary content was not exposed to an independent REVIEW replica: %+v", got.ParallelReviewCandidates)
+	}
+	if len(got.ReviewDispatchCandidates) != 2 ||
+		got.ReviewDispatchCandidates[0].Number != 20 ||
+		got.ReviewDispatchCandidates[1].Number != 1 {
+		t.Fatalf("wake-up hint lost owner or parallel content: %+v", got.ReviewDispatchCandidates)
+	}
 	if len(got.ReviewBacklog) != 2 {
 		t.Fatalf("total review backlog hid deferred content: %+v", got)
 	}
@@ -623,10 +701,41 @@ func TestSingleFlightExposesOnlyFirstIntegrationReview(t *testing.T) {
 	}
 }
 
+func TestParallelReviewCandidatesExcludeFallbackAndMergeOwner(t *testing.T) {
+	owner := candidate{Number: 20, Head: headA, Stage: "integration-review"}
+	result := report{
+		ReviewCandidates: []candidate{owner},
+		ContentReviewCandidates: []candidate{
+			{Number: 1, Head: headA, Stage: "review", Depth: 0},
+			{Number: 2, Head: headA, Stage: "review", Depth: 1},
+			{Number: 3, Head: headA, Stage: "review", Depth: 2},
+			{Number: 4, Head: headA, Stage: "pre-review-validation", Depth: 0},
+		},
+	}
+	applySingleFlight(&result)
+	if len(result.ParallelReviewCandidates) != 2 ||
+		result.ParallelReviewCandidates[0].Number != 1 ||
+		result.ParallelReviewCandidates[1].Number != 2 ||
+		len(result.ReviewCandidates) != 1 || result.ReviewCandidates[0] != owner {
+		t.Fatalf("parallel lane widened integration or fallback authority: %+v", result)
+	}
+
+	result = report{
+		ReviewCandidates:        []candidate{{Number: 20, Head: headA, Stage: "integration-merge-ready"}},
+		ContentReviewCandidates: []candidate{{Number: 1, Head: headA, Stage: "review"}},
+	}
+	applySingleFlight(&result)
+	if len(result.ParallelReviewCandidates) != 0 || len(result.ReviewCandidates) != 1 ||
+		result.ReviewCandidates[0].Number != 1 {
+		t.Fatalf("merge-ready owner should use the ordinary REVIEW lane: %+v", result)
+	}
+}
+
 func TestWithoutIntegrationOwnerContentCandidatesAreExecutable(t *testing.T) {
 	got := analyze([]apiPull{testPR(20, headA), testPR(10, headB)}, "ivanarama")
 	if got.IntegrationOwner != nil || len(got.ReviewCandidates) != 2 ||
-		got.ReviewCandidates[0].Number != 10 || len(got.ContentReviewCandidates) != 2 {
+		got.ReviewCandidates[0].Number != 10 || len(got.ContentReviewCandidates) != 2 ||
+		len(got.ReviewDispatchCandidates) != 2 || len(got.ParallelReviewCandidates) != 0 {
 		t.Fatalf("content lane was not exposed as executable: %+v", got)
 	}
 }

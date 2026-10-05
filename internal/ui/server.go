@@ -450,6 +450,10 @@ func (s *Server) Mount(r chi.Router) {
 	r.Post("/ui/admin/navigation/preview", s.adminNavigationPreview)
 	r.Post("/ui/admin/navigation/save", s.adminNavigationSave)
 	r.Post("/ui/admin/navigation/reset", s.adminNavigationReset)
+	r.Get("/ui/settings/navigation", s.personalNavigation)
+	r.Post("/ui/settings/navigation/preview", s.personalNavigationPreview)
+	r.Post("/ui/settings/navigation/save", s.personalNavigationSave)
+	r.Post("/ui/settings/navigation/reset", s.personalNavigationReset)
 	r.Get("/ui/admin/users/new", s.adminUserNew)
 	r.Post("/ui/admin/users/new", s.adminUserCreate)
 	r.Get("/ui/admin/users/{id}", s.adminUserCard)
@@ -599,6 +603,7 @@ func (s *Server) Mount(r chi.Router) {
 	// PDF export отчётов (issue #218) — реальный бинарный PDF, как у печатных форм.
 	r.Get("/ui/report/{name}/pdf", s.reportPDF)
 	r.Get("/ui/report/{name}/export/{format}", s.reportExportJobStart)
+	r.Get("/ui/export-jobs", s.exportJobList)
 	r.Get("/ui/export-jobs/{id}", s.exportJobStatus)
 	r.Get("/ui/export-jobs/{id}/download", s.exportJobDownload)
 
